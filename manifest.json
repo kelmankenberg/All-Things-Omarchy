@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "kel.all-things-omarchy",
+  "name": "All Things Omarchy",
+  "version": "0.1.0",
+  "author": "Kelly",
+  "license": "MIT",
+  "description": "A customizable Omarchy dashboard for plugins, themes, news, videos, releases, documentation, meetups, saved items, and system status.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "All Things Omarchy",
+    "description": "An actionable Omarchy briefing with feeds, documentation, meetups, saved items, and system controls.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
