@@ -513,9 +513,55 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "A"
-    fontSize: Style.font.body
+    labelVisible: false
+    hasVisualContent: true
+    fixedWidth: vertical ? barSize : Style.bar.iconSlot
+    fixedHeight: vertical ? Style.bar.iconSlot : barSize
     tooltipText: strings.t("widget.tooltip")
+    Item {
+      anchors.centerIn: parent
+      width: Style.bar.iconSize
+      height: width
+      scale: button.pressScale
+
+      Repeater {
+        model: [45, -45]
+        delegate: Rectangle {
+          required property int modelData
+          anchors.centerIn: parent
+          width: parent.width * 0.9
+          height: parent.height * 0.1
+          radius: height / 2
+          rotation: modelData
+          color: button.foreground
+          antialiasing: true
+        }
+      }
+      Repeater {
+        model: [
+          { x: 0.16, y: 0.16 }, { x: 0.84, y: 0.16 },
+          { x: 0.16, y: 0.84 }, { x: 0.84, y: 0.84 }
+        ]
+        delegate: Rectangle {
+          required property var modelData
+          width: parent.width * 0.25
+          height: width
+          x: parent.width * modelData.x - width / 2
+          y: parent.height * modelData.y - height / 2
+          radius: width / 2
+          color: button.foreground
+          antialiasing: true
+        }
+      }
+      Rectangle {
+        anchors.centerIn: parent
+        width: parent.width * 0.38
+        height: width
+        radius: width / 2
+        color: Commons.Color.accent
+        antialiasing: true
+      }
+    }
     onPressed: {
       if (root.pendingDisplayRequest) root.pendingDisplayRequest = ""
       else if (window.visible) root.close()
