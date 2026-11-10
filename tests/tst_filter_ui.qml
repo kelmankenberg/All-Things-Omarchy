@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Controls
 import QtTest
+import qs.Commons as Commons
 import ".." as Plugin
 
 TestCase {
@@ -67,7 +68,7 @@ TestCase {
       testCase.lastSetting = key + ":" + value
       var next = Object.assign({}, model.settings || {})
       next[key] = value === "true" ? true : value === "false" ? false
-        : key.endsWith("Limit") ? Number(value) : value
+        : key.endsWith("Limit") || key === "navigationWidth" ? Number(value) : value
       model = Object.assign({}, model, { settings: next })
     }
     onMutationRequested: function(action, itemId) { testCase.lastMutation = action + ":" + itemId }
@@ -88,6 +89,7 @@ TestCase {
     app.navigationCollapsed = false
     app.currentSettingsSection = "general"
     app.busy = false
+    app.readingActive = true
     app.currentTime = 150000
     app.systemData = ({})
     app.themeData = ({})
@@ -124,6 +126,215 @@ TestCase {
     for (var index = 0; index < value.length; ++index)
       keyClick(value.charAt(index).toUpperCase().charCodeAt(0))
     return input
+  }
+
+  function test_bulk_read_controls_use_section_even_with_active_filters() {
+    app.queries = ({ plugins: "No matches" })
+    compare(app.sectionItems("plugins").length, 0)
+    var read = findChild(app, "markAllRead")
+    var unread = findChild(app, "markAllUnread")
+    verify(read.visible && read.enabled && unread.enabled)
+    read.clicked()
+    compare(lastMutation, "mark-all-read:plugins")
+    unread.clicked()
+    compare(lastMutation, "mark-all-unread:plugins")
+    app.busy = true
+    verify(!read.enabled && !unread.enabled)
+    app.busy = false
+    app.setSection("manual")
+    verify(read.visible && !read.enabled)
+    app.setSection("saved")
+    verify(read.visible && !read.enabled)
+    app.setSection("dashboard")
+    verify(read.visible && read.enabled)
+    read.clicked()
+    compare(lastMutation, "mark-all-read:dashboard")
+    unread.clicked()
+    compare(lastMutation, "mark-all-unread:dashboard")
+    app.setSection("settings")
+    verify(!read.visible)
+  }
+
+  function prepareScrollReading(settings) {
+    var rows = []
+    for (var index = 0; index < 30; index++)
+      rows.push(item("Row " + index, "", "plugins"))
+    app.model = ({ items: { plugins: rows }, settings: settings || ({}) })
+    var list = findChild(app, "listingScroll")
+    verify(list !== null)
+    list.forceLayout()
+    list.positionViewAtBeginning()
+    wait(50)
+    return list
+  }
+
+  function test_bulk_read_actions_align_right_in_the_section_title_row() {
+    var header = findChild(app, "sectionHeader")
+    var title = findChild(app, "sectionHeading")
+    var read = findChild(app, "markAllRead")
+    var unread = findChild(app, "markAllUnread")
+    tryVerify(function() {
+      var titleCenter = title.mapToItem(header, 0, title.height / 2)
+      var readCenter = read.mapToItem(header, 0, read.height / 2)
+      var unreadEnd = unread.mapToItem(header, unread.width, unread.height / 2)
+      return Math.abs(titleCenter.y - readCenter.y) <= 1
+        && Math.abs(titleCenter.y - unreadEnd.y) <= 1
+        && Math.abs(unreadEnd.x - header.width) <= 1
+        && title.mapToItem(header, title.width, 0).x <= readCenter.x
+    })
+  }
+
+  function dragNavigationBy(delta) {
+    var handle = findChild(app, "navigationResizeHandle")
+    var start = handle.mapToItem(app, handle.width / 2, handle.height / 2)
+    mousePress(app, start.x, start.y)
+    mouseMove(app, start.x + delta, start.y, 30)
+    mouseRelease(app, start.x + delta, start.y)
+  }
+
+  function test_navigation_width_drag_is_bounded_saved_and_restored() {
+    var panel = findChild(app, "navigationPanel")
+    var handle = findChild(app, "navigationResizeHandle")
+    tryCompare(panel, "width", 160)
+    dragNavigationBy(40)
+    tryCompare(panel, "width", 200)
+    compare(lastSetting, "navigationWidth:200")
+    compare(app.model.settings.navigationWidth, 200)
+    dragNavigationBy(100)
+    tryCompare(panel, "width", 220)
+    compare(lastSetting, "navigationWidth:220")
+    app.navigationCollapsed = true
+    tryCompare(panel, "width", 52)
+    verify(!handle.visible)
+    app.navigationCollapsed = false
+    tryCompare(panel, "width", 220)
+    dragNavigationBy(-200)
+    tryCompare(panel, "width", 160)
+    compare(lastSetting, "navigationWidth:160")
+    app.model = Object.assign({}, app.model, { settings: { navigationWidth: 190 } })
+    tryCompare(panel, "width", 190)
+    app.busy = true
+    verify(!handle.enabled)
+  }
+
+  function test_scrolling_past_visible_rows_marks_read_after_one_second() {
+    var list = prepareScrollReading()
+    var first = list.itemAtIndex(0)
+    verify(first !== null)
+    var id = first.modelData.id
+    list.contentY = first.y + first.height + 5
+    wait(500)
+    compare(lastMutation, "")
+    tryVerify(function() { return lastMutation.indexOf("mark-read-items:") === 0 }, 1000)
+    var ids = JSON.parse(lastMutation.substring("mark-read-items:".length))
+    verify(ids.indexOf(id) >= 0)
+    verify(ids.indexOf("plugins:Row 29") < 0)
+  }
+
+  function test_scrolling_back_cancels_pending_read() {
+    var list = prepareScrollReading()
+    var first = list.itemAtIndex(0)
+    list.contentY = first.y + first.height + 5
+    wait(350)
+    list.positionViewAtBeginning()
+    wait(1100)
+    compare(lastMutation, "")
+  }
+
+  function test_read_updates_preserve_feed_scroll_position() {
+    var list = prepareScrollReading()
+    list.contentY = 280
+    wait(50)
+    var position = list.contentY
+    var visibleIndex = list.indexAt(10, position + 10)
+    verify(visibleIndex >= 0)
+    var visibleRow = list.itemAtIndex(visibleIndex)
+    var originalItems = app.model.items.plugins
+    var changed = originalItems.map(function(entry, index) {
+      return Object.assign({}, entry, { isRead: index === 0, isSaved: index === 1 })
+    })
+    app.model = Object.assign({}, app.model, { items: { plugins: changed } })
+    list.forceLayout()
+    wait(50)
+    compare(list.contentY, position)
+    compare(list.itemAtIndex(visibleIndex), visibleRow)
+  }
+
+  function test_read_updates_preserve_dashboard_scroll_position() {
+    var rows = []
+    for (var index = 0; index < 12; index++)
+      rows.push(item("Dashboard " + index, "", "plugins"))
+    app.model = ({ items: { plugins: rows },
+      settings: { dashboard_system: false, dashboard_events: false, dashboard_saved: false } })
+    app.setSection("dashboard")
+    var dashboard = findChild(app, "dashboardPage")
+    wait(80)
+    dashboard.contentItem.contentY = 250
+    wait(50)
+    var position = dashboard.contentItem.contentY
+    var panel = findChild(app, "dashboardPanel_catchup")
+    app.model = Object.assign({}, app.model, { items: { plugins: rows.map(function(entry, index) {
+      return Object.assign({}, entry, { isRead: index === 0 })
+    }) } })
+    wait(80)
+    compare(dashboard.contentItem.contentY, position)
+    compare(findChild(app, "dashboardPanel_catchup"), panel)
+  }
+
+  function test_dashboard_items_are_marked_after_scrolling_past_them() {
+    var rows = []
+    for (var index = 0; index < 12; index++)
+      rows.push(item("Dashboard " + index, "", "plugins"))
+    app.model = ({ items: { plugins: rows },
+      settings: { dashboard_system: false, dashboard_events: false, dashboard_saved: false } })
+    app.setSection("dashboard")
+    var dashboard = findChild(app, "dashboardPage")
+    wait(80)
+    var firstTitle = findChild(app, "briefingTitle_plugins:Dashboard 0")
+    verify(firstTitle !== null)
+    var row = firstTitle.parent
+    var bottom = row.mapToItem(dashboard.contentItem.contentItem, 0, row.height).y
+    dashboard.contentItem.contentY = bottom + 5
+    wait(500)
+    compare(lastMutation, "")
+    tryVerify(function() { return lastMutation.indexOf("mark-read-items:") === 0 }, 1000)
+    var ids = JSON.parse(lastMutation.substring("mark-read-items:".length))
+    verify(ids.indexOf("plugins:Dashboard 0") >= 0)
+    verify(ids.indexOf("plugins:Dashboard 11") < 0)
+  }
+
+  function test_scroll_read_waits_for_busy_work_and_cancels_when_hidden() {
+    var list = prepareScrollReading()
+    app.busy = true
+    var first = list.itemAtIndex(0)
+    list.contentY = first.y + first.height + 5
+    wait(1200)
+    compare(lastMutation, "")
+    app.busy = false
+    tryVerify(function() { return lastMutation.indexOf("mark-read-items:") === 0 }, 500)
+    list.positionViewAtBeginning()
+    wait(50)
+    lastMutation = ""
+    list.contentY = first.y + first.height + 5
+    app.readingActive = false
+    wait(1200)
+    compare(lastMutation, "")
+  }
+
+  function test_scroll_read_opt_out_and_filter_changes_do_not_mark_items() {
+    var list = prepareScrollReading({ markReadOnScroll: false })
+    var first = list.itemAtIndex(0)
+    list.contentY = first.y + first.height + 5
+    wait(1200)
+    compare(lastMutation, "")
+    app.model = Object.assign({}, app.model, { settings: { markReadOnScroll: true } })
+    list.positionViewAtBeginning()
+    wait(50)
+    first = list.itemAtIndex(0)
+    list.contentY = first.y + first.height + 5
+    app.queries = ({ plugins: "Row 29" })
+    wait(1200)
+    compare(lastMutation, "")
   }
 
   function test_termsCanBeAddedRemovedAndKeptPerSection() {
@@ -282,6 +493,54 @@ TestCase {
     app.navigationCollapsed = false
     compare(saved.text, app.sectionTitle("saved") + "  0")
     app.model = original
+  }
+
+  function test_read_borders_follow_theme_and_revert_when_marked_unread() {
+    var entry = item("Border state", "", "plugins")
+    app.model = ({ items: { plugins: [entry] } })
+    var list = findChild(app, "listingScroll")
+    list.forceLayout()
+    var card = list.itemAtIndex(0)
+    verify(card !== null)
+    compare(card.border.color, Qt.color(Commons.Color.popups.border))
+    compare(findChild(card, "itemPreview").border.width, 0)
+
+    app.model = ({ items: { plugins: [Object.assign({}, entry, { isRead: true })] } })
+    list.forceLayout()
+    card = list.itemAtIndex(0)
+    compare(card.border.color, Commons.Color.muted)
+    compare(findChild(card, "itemPreview").border.width, 0)
+    var originalMuted = Commons.Color.muted
+    try {
+      Commons.Color.muted = "#99bbaa"
+      compare(card.border.color, Commons.Color.muted)
+      compare(findChild(card, "itemPreview").border.width, 0)
+    } finally {
+      Commons.Color.muted = originalMuted
+    }
+
+    app.model = ({ items: { plugins: [entry] } })
+    list.forceLayout()
+    card = list.itemAtIndex(0)
+    compare(card.border.color, Qt.color(Commons.Color.popups.border))
+    compare(findChild(card, "itemPreview").border.width, 0)
+
+    app.setSection("dashboard")
+    var eventId = fixtureModel.items.events[1].id
+    app.model = fixtureModel
+    var divider = findChild(app, "briefingBorder_" + eventId)
+    verify(divider !== null)
+    compare(divider.color, Qt.color(Commons.Color.popups.border))
+    app.model = Object.assign({}, fixtureModel, { items: Object.assign({}, fixtureModel.items, {
+      events: fixtureModel.items.events.map(function(event) {
+        return Object.assign({}, event, { isRead: true })
+      })
+    }) })
+    divider = findChild(app, "briefingBorder_" + eventId)
+    compare(divider.color, Commons.Color.muted)
+    app.model = fixtureModel
+    divider = findChild(app, "briefingBorder_" + eventId)
+    compare(divider.color, Qt.color(Commons.Color.popups.border))
   }
 
   function test_item_actions_are_borderless_and_highlight_on_hover() {
@@ -603,6 +862,56 @@ TestCase {
     compare(systemRequests, 1)
     findChild(app, "toolbarRefreshButton").clicked()
     compare(systemRequests, 2)
+  }
+
+  function test_new_item_badges_cover_sections_dashboard_saved_and_collapse() {
+    var plugin = Object.assign(item("New plugin", "", "plugins"), { isNew: true })
+    var saved = Object.assign(item("Saved new story", "", "news"), { isNew: true, isSaved: true })
+    app.model = ({
+      items: { plugins: [plugin], news: [], saved: [saved] },
+      newCounts: { plugins: 2, news: 1, events: 3 }
+    })
+    var pluginBadge = findChild(app, "newCountBadge_plugins")
+    var newsBadge = findChild(app, "newCountBadge_news")
+    var eventsBadge = findChild(app, "newCountBadge_events")
+    var dashboardBadge = findChild(app, "newCountBadge_dashboard")
+    var savedBadge = findChild(app, "newCountBadge_saved")
+    verify(pluginBadge.visible && newsBadge.visible && eventsBadge.visible)
+    verify(dashboardBadge.visible && savedBadge.visible)
+    compare(findChild(pluginBadge, "newBadgeText_plugins").text, "2")
+    compare(findChild(eventsBadge, "newBadgeText_events").text, "3")
+    compare(findChild(dashboardBadge, "newBadgeText_dashboard").text, "6")
+    compare(findChild(savedBadge, "newBadgeText_saved").text, "1")
+    verify(findChild(app, "navigationButton_plugins").description.indexOf("2") >= 0)
+    app.navigationCollapsed = true
+    verify(pluginBadge.visible && newsBadge.visible && savedBadge.visible)
+    compare(findChild(app, "navigationButton_plugins").text, app.sectionIcons.plugins)
+    app.model = ({ items: { plugins: [plugin], saved: [saved] }, newCounts: { plugins: 0 } })
+    verify(!pluginBadge.visible && !dashboardBadge.visible && savedBadge.visible)
+  }
+
+  function test_periodic_refresh_preferences_default_to_thirty_and_bound_video_cost() {
+    app.setSection("settings")
+    findChild(app, "settingsNav_refresh").clicked()
+    wait(50)
+    var periodic = findChild(app, "setting_periodicRefresh")
+    var interval = findChild(app, "setting_refreshInterval")
+    var videos = findChild(app, "setting_periodicVideos")
+    verify(periodic !== null && periodic.checked)
+    verify(interval !== null)
+    compare(interval.count, 6)
+    compare(interval.currentIndex, 3)
+    verify(videos !== null && !videos.checked)
+    interval.activated(0)
+    compare(lastSetting, "refreshInterval:10")
+    periodic.checked = false
+    periodic.toggled()
+    compare(lastSetting, "periodicRefresh:false")
+    videos.checked = true
+    videos.toggled()
+    compare(lastSetting, "periodicVideos:true")
+    findChild(app, "reset_refresh").clicked()
+    compare(lastReset, "refresh")
   }
 
   function test_settings_navigation_shows_only_selected_category_and_resets_scroll() {

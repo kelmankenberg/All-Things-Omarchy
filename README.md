@@ -1,5 +1,7 @@
 # All Things Omarchy
 
+[Changelog](CHANGELOG.md)
+
 One place to browse the Omarchy plugin marketplace, official community themes,
 YouTube search results, official Omarchy News, releases, the manual, default
 hotkeys, community resources, meetups, and local system information. It opens as a panel attached
@@ -8,6 +10,9 @@ full-screen window. The last display mode and window size are remembered when
 reopening; the window manager may override the size when the window is tiled.
 The toolbar's navigation toggle switches between labeled and icon-only navigation;
 hover an icon for its label.
+Drag the navigation's right-edge divider to adjust its expanded width from
+160 to 220 pixels (scaled with the interface). The width is saved between
+sessions; collapsed navigation stays at 52 pixels.
 
 ## Sections
 
@@ -15,9 +20,10 @@ hover an icon for its label.
   update/check controls, source errors with a retry-all button, eight new/unread
   items across feeds, the next three meetups, and four saved unread items.
   Items offer Open, Save/Unsave, and Mark Read actions; source refresh times
-  show when cached content was last successfully fetched. NEW means first
-  discovered during the latest refresh, not necessarily published since your
-  last visit. Unread items remain in the briefing until marked read.
+  show when cached content was last successfully fetched. NEW means newly
+  discovered by a feed refresh, not necessarily published since your last
+  visit. New badges remain until marked read; the bar icon changes color while
+  any new items are unacknowledged.
 - **Plugins**, **Themes**, **YouTube**, and **News** each have their own text
   filter and read/unread and save actions. Plugins, YouTube, and News also have
   date selectors (today, this week, this month, or all time). This week starts
@@ -55,16 +61,37 @@ hover an icon for its label.
   Launcher diagnostics are stored in `update-launch.log` beside the plugin's
   state file if the terminal does not open.
 - **Saved** keeps items from any source available after they leave a feed.
+- Every item section, including Saved, offers **Mark all read** and **Mark all
+  unread** for all loaded items in that section, including filtered-out items.
+  Read state is shared between a feed and its saved copies. Items that were
+  visible and then scrolled completely above the list are marked read after
+  1 second; scrolling back to them cancels the pending change. Skipped,
+  never-visible rows are not marked. Closing the view or changing its filters
+  cancels pending changes. This behavior can be disabled under Settings →
+  Appearance.
+  Read items use the theme's muted secondary color for their card borders;
+  marking an item unread restores the primary borders. Thumbnails have no border.
+  Read-status updates preserve the list's scroll position.
+  Dashboard provides the same actions for all loaded feed and Saved items,
+  and also marks viewed briefing items read after scrolling past them.
 - **Settings** groups appearance/reading, refresh, dashboard, and section
   preferences in its own left navigation, showing only the selected category.
   On narrow panels the category navigation shows icons with label tooltips.
   Choose comfortable or compact rows (compact hides excerpts),
-  disable preview loading, or turn off marking items read when opened.
+  disable preview loading, or turn off marking items read when opened or
+  scrolled past.
   Dashboard panels can be hidden/reordered, with configurable item counts,
   included catch-up sources, and a new-only mode.
   Refresh-on-open has a master switch and individual source switches; manual
-  Refresh still checks all sources. Automatic system checks can be disabled
-  independently. No timed background refresh or automatic update is enabled.
+  Refresh still checks all sources. Scheduled feed refresh is enabled by
+  default every 30 minutes and can be disabled or set to 10, 15, 20, 30, 45,
+  or 60 minutes. It runs only after feeds have been loaded, while the shell is
+  running, and respects the source switches. YouTube is excluded by default
+  from scheduled refresh to limit network use, but can be enabled separately.
+  Scheduled checks never query package mirrors or install updates. A grouped
+  desktop notification lists the sections where a refresh found new items;
+  notifications can be disabled in Settings → Refresh. Automatic system checks
+  can be disabled independently.
   Each section can remember its query, up to 16 filter chips, and date selection
   across restarts. Disabling remembering deletes stored filters but leaves the
   current session unchanged. Group resets preserve saved items/read history;
@@ -78,8 +105,9 @@ This plugin does not install plugins or themes.
 
 ## Sources and network use
 
-The plugin contacts these fixed HTTPS sources only when opened (if
-refresh-on-open is enabled) or when **Refresh** is selected:
+The plugin contacts these fixed HTTPS sources when opened (if refresh-on-open
+and that source are enabled), on the configured periodic schedule (if enabled
+and that source is enabled; YouTube is opt-in), or when **Refresh** is selected:
 
 - `https://plugins.omarchy.org/catalog.json`
 - `https://omarchy.org/themes/`
@@ -110,7 +138,7 @@ results are not a complete archive. Items without a date appear only under
 All time. Refresh after changing the YouTube result limit.
 
 Read status, saved items, settings, and cached listings are stored locally in
-`${XDG_STATE_HOME:-~/.local/state}/all-things-omarchy/state.json`. Display
+``${XDG_STATE_HOME:-~/.local/state}/all-things-omarchy/state.json`. Display
 preferences are stored beside it in `display.json`. Search text
 is local and is not sent to the sources. The plugin does not run background
 refreshes, install downloaded content, or use credentials.

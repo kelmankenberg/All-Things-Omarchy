@@ -75,7 +75,10 @@ FILTER_SECTIONS = SOURCE_KEYS + ("saved",)
 DASHBOARD_PANELS = ("system", "catchUp", "events", "saved")
 DEFAULT_SETTINGS.update({
     "showPreviews": True, "density": "comfortable", "markReadOnOpen": True,
-    "systemCheckOnOpen": True,
+    "markReadOnScroll": True, "navigationWidth": 160,
+    "systemCheckOnOpen": True, "periodicRefresh": True, "refreshInterval": 30,
+    "newItemNotifications": True,
+    "periodicVideos": False,
     "dashboardOrder": ",".join(DASHBOARD_PANELS), "dashboardNewOnly": False,
     "catchUpLimit": 8, "eventsLimit": 3, "savedLimit": 4,
     **{"refresh_" + section: True for section in SOURCE_KEYS},
@@ -88,6 +91,8 @@ BOOLEAN_SETTINGS = {key for key, value in DEFAULT_SETTINGS.items() if isinstance
 SETTING_VALUES.update({key: {"true", "false"} for key in BOOLEAN_SETTINGS})
 SETTING_VALUES.update({
     "density": {"compact", "comfortable"},
+    "navigationWidth": {str(width) for width in range(160, 221)},
+    "refreshInterval": {"10", "15", "20", "30", "45", "60"},
     "dashboardOrder": {",".join(order).lower() for order in permutations(DASHBOARD_PANELS)},
     "catchUpLimit": {"4", "8", "12", "16"},
     "eventsLimit": {"1", "3", "5"},
@@ -96,10 +101,12 @@ SETTING_VALUES.update({
 # Settings values are normalized to lowercase on disk and at the CLI boundary.
 DEFAULT_SETTINGS["dashboardOrder"] = DEFAULT_SETTINGS["dashboardOrder"].lower()
 SETTING_GROUPS = {
-    "general": {"showPreviews", "density", "markReadOnOpen"},
+    "general": {"showPreviews", "density", "markReadOnOpen", "markReadOnScroll", "navigationWidth"},
     "dashboard": {key for key in DEFAULT_SETTINGS if key.startswith("dashboard")
                   or key in ("catchUpLimit", "eventsLimit", "savedLimit")},
-    "refresh": {"refreshOnOpen", "systemCheckOnOpen"} |
+    "refresh": {"refreshOnOpen", "systemCheckOnOpen", "periodicRefresh", "refreshInterval",
+                "newItemNotifications",
+                "periodicVideos"} |
                {"refresh_" + section for section in SOURCE_KEYS},
     **{section: {"remember_" + section} | (
         {"refresh_" + section} if section in SOURCE_KEYS else set()) |
@@ -318,7 +325,7 @@ def valid_settings(value):
             continue
         if key in BOOLEAN_SETTINGS:
             settings[key] = normalized == "true"
-        elif key.endswith("Limit"):
+        elif key.endswith("Limit") or key in ("refreshInterval", "navigationWidth"):
             settings[key] = int(normalized)
         else:
             settings[key] = normalized
@@ -1165,7 +1172,7 @@ def public_state(state, errors=None):
         new_counts[key] = 0
         for item in items:
             item["isRead"] = item["id"] in read_ids
-            item["isNew"] = item["id"] in new_ids
+            item["isNew"] = item["id"] in new_ids and item["id"] not in read_ids
             item["isSaved"] = item["id"] in saved_by_id
             if not item["isRead"]:
                 unread_counts[key] += 1
@@ -1175,7 +1182,7 @@ def public_state(state, errors=None):
     saved_items = []
     for item in state["savedItems"]:
         item["isRead"] = item["id"] in read_ids
-        item["isNew"] = item["id"] in new_ids
+        item["isNew"] = item["id"] in new_ids and item["id"] not in read_ids
         item["isSaved"] = True
         saved_items.append(item)
     output_items["saved"] = saved_items
@@ -1254,9 +1261,11 @@ def perform_fetch(state, sources=None):
     if state["baselineEstablished"]:
         unrefreshed_ids = {item["id"] for key in SOURCE_KEYS if key not in updated
                           for item in state["sources"].get(key, {}).get("items", [])}
+        unrefreshed_ids.update(item["id"] for item in state["savedItems"])
+        pending_new_ids = set(state["newIds"]) - set(state["readIds"])
         state["newIds"] = list(dict.fromkeys(
-            [item_id for item_id in state["newIds"] if item_id in unrefreshed_ids]
-            + [item_id for item_id in all_ids if item_id not in prior]))
+            [item_id for item_id in all_ids if item_id not in prior or item_id in pending_new_ids]
+            + [item_id for item_id in pending_new_ids if item_id in unrefreshed_ids]))
     else:
         state["newIds"] = []
         state["baselineEstablished"] = True
@@ -1266,7 +1275,48 @@ def perform_fetch(state, sources=None):
 
 
 def mutate(state, command):
-    if command == "clear-saved":
+    if command in ("mark-all-read", "mark-all-unread", "mark-read-items"):
+        if len(sys.argv) != 3:
+            raise ValueError(command + " requires a section or item list.")
+        if command == "mark-read-items":
+            raw = sys.argv[2]
+            if len(raw.encode("utf-8")) > 65536:
+                raise ValueError("The item list is too large.")
+            item_ids = json.loads(raw)
+            if not isinstance(item_ids, list) or not 1 <= len(item_ids) <= 200 or any(
+                    not isinstance(item_id, str)
+                    or not re.fullmatch(r"[a-z]+:[A-Za-z0-9._-]{1,180}", item_id)
+                    for item_id in item_ids):
+                raise ValueError("Invalid item list.")
+            available_ids = {item["id"] for source in state["sources"].values()
+                             for item in source["items"]}
+            available_ids.update(item["id"] for item in state["savedItems"])
+            if not set(item_ids) <= available_ids:
+                raise ValueError("An item is no longer available to mark read.")
+        else:
+            section = sys.argv[2]
+            if section not in FILTER_SECTIONS + ("dashboard",):
+                raise ValueError("Choose a valid item section.")
+            if section == "dashboard":
+                items = [item for source in state["sources"].values() for item in source["items"]]
+                items += state["savedItems"]
+            else:
+                items = state["savedItems"] if section == "saved" else state["sources"].get(
+                    section, {}).get("items", [])
+            item_ids = [item["id"] for item in items]
+        selected_ids = set(item_ids)
+        read_ids = set(state["readIds"])
+        if command == "mark-all-unread":
+            read_ids.difference_update(selected_ids)
+        else:
+            read_ids.update(selected_ids)
+        if len(read_ids) > MAX_KNOWN_IDS:
+            raise ValueError("Read history is full; mark some items unread first.")
+        state["readIds"] = sorted(read_ids)
+        if command != "mark-all-unread":
+            state["newIds"] = [item_id for item_id in state["newIds"]
+                               if item_id not in selected_ids]
+    elif command == "clear-saved":
         if len(sys.argv) != 2:
             raise ValueError("clear-saved takes no arguments.")
         state["savedItems"] = []
@@ -1309,6 +1359,8 @@ def mutate(state, command):
         else:
             read_ids.add(item_id)
         state["readIds"] = list(read_ids)[-MAX_KNOWN_IDS:]
+        if item_id in read_ids:
+            state["newIds"] = [known_id for known_id in state["newIds"] if known_id != item_id]
     elif command == "set-setting":
         if len(sys.argv) != 4:
             raise ValueError("set-setting requires a setting name and value.")
@@ -1544,17 +1596,26 @@ def main():
     if sys.argv[1] == "load":
         print(json.dumps(public_state(state), ensure_ascii=True, separators=(",", ":")))
     elif sys.argv[1] == "fetch":
-        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] != "on-open"):
-            raise ValueError("fetch accepts only the optional on-open mode.")
-        sources = [key for key in SOURCE_KEYS if state["settings"].get("refresh_" + key, True)] \
-            if len(sys.argv) == 3 and state["settings"]["refreshOnOpen"] else (
-                [] if len(sys.argv) == 3 else SOURCE_KEYS)
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] not in ("on-open", "scheduled")):
+            raise ValueError("fetch accepts only on-open or scheduled mode.")
+        mode = sys.argv[2] if len(sys.argv) == 3 else "manual"
+        selected = state["settings"]
+        if mode == "on-open":
+            sources = [key for key in SOURCE_KEYS if selected.get("refresh_" + key, True)] \
+                if selected["refreshOnOpen"] else []
+        elif mode == "scheduled":
+            sources = [key for key in SOURCE_KEYS if selected.get("refresh_" + key, True)
+                       and (key != "videos" or selected.get("periodicVideos", False))] \
+                if selected.get("periodicRefresh", True) else []
+        else:
+            sources = list(SOURCE_KEYS)
         payload = perform_fetch(state, sources)
         result = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         if len(result.encode("utf-8")) > MAX_OUTPUT_BYTES:
             raise ValueError("The combined data response exceeded the output limit.")
         print(result)
     elif sys.argv[1] in ("mark-read", "toggle-read", "toggle-saved", "set-setting",
+                        "mark-all-read", "mark-all-unread", "mark-read-items",
                         "save-filters", "reset-settings", "clear-saved"):
         mutate(state, sys.argv[1])
     else:

@@ -22,6 +22,11 @@ Rectangle {
   property double currentTime: Date.now()
   property bool windowMode: false
   property bool navigationCollapsed: false
+  property int navigationWidth: 160
+  readonly property int savedNavigationWidth: Math.max(160, Math.min(220,
+    Number(setting("navigationWidth", 160))))
+  onSavedNavigationWidthChanged: navigationWidth = savedNavigationWidth
+  Component.onCompleted: navigationWidth = savedNavigationWidth
   property var systemData: ({})
   property bool systemBusy: false
   property string systemError: ""
@@ -34,6 +39,9 @@ Rectangle {
   property string updateError: ""
   property string updateLog: ""
   property string filterNotice: ""
+  property bool readingActive: true
+  readonly property var bulkItems: currentSection === "dashboard" ? allLoadedItems()
+    : ((model.items || {})[currentSection] || [])
 
   signal refreshRequested()
   signal modeRequested(string mode)
@@ -206,6 +214,7 @@ Rectangle {
   component BriefingItem: ColumnLayout {
     id: briefingItem
     required property var item
+    readonly property var readItem: item
     Layout.fillWidth: true
     spacing: Style.space(root.compactRows ? 2 : 4)
     BriefingText {
@@ -255,10 +264,11 @@ Rectangle {
       Item { Layout.fillWidth: true }
     }
     Rectangle {
+      objectName: "briefingBorder_" + briefingItem.item.id
       Layout.fillWidth: true
       Layout.topMargin: Style.space(4)
       implicitHeight: 1
-      color: Commons.Color.popups.border
+      color: root.itemBorderColor(briefingItem.item)
     }
   }
 
@@ -267,15 +277,13 @@ Rectangle {
     implicitWidth: Style.space(64)
     implicitHeight: Style.space(40)
     color: "transparent"
-    border.color: Commons.Color.popups.border
-    border.width: 1
+    border.width: 0
     clip: true
 
     Image {
       id: themeImage
       objectName: "thumbnailImage"
       anchors.fill: parent
-      anchors.margins: 1
       source: parent.imageUrl
       sourceSize.width: 128
       sourceSize.height: 80
@@ -303,6 +311,10 @@ Rectangle {
   function setting(key, fallback) {
     var settings = root.model.settings || {}
     return settings[key] === undefined ? fallback : settings[key]
+  }
+
+  function itemBorderColor(item) {
+    return item.isRead === true ? Commons.Color.muted : Commons.Color.popups.border
   }
 
   function settingsSectionTitle(section) {
@@ -344,6 +356,38 @@ Rectangle {
     return rows
   }
 
+  function allLoadedItems() {
+    var rows = []
+    sourceIds.concat(["saved"]).forEach(function(section) {
+      rows = rows.concat((root.model.items || {})[section] || [])
+    })
+    return rows
+  }
+
+  function collectReadRows(parent) {
+    var rows = []
+    for (var index = 0; index < parent.children.length; index++) {
+      var child = parent.children[index]
+      if (child.readItem) rows.push(child)
+      else rows = rows.concat(collectReadRows(child))
+    }
+    return rows
+  }
+
+  component ReadingTracker: ScrollReadTracker {
+    id: tracker
+    tracking: root.readingActive && root.visible && root.setting("markReadOnScroll", true)
+    busy: root.busy
+    contextKey: JSON.stringify([root.currentSection, root.queries, root.filterTerms, root.dateRanges])
+    onReadRequested: function(ids) { root.mutationRequested("mark-read-items", JSON.stringify(ids)) }
+    Connections {
+      target: root
+      function onMutationRequested(action, itemId) {
+        if (action !== "mark-read-items") tracker.resetReading()
+      }
+    }
+  }
+
   function addFilterTerm(section) {
     var value = String(queries[section] || "").trim()
     if (!value) return
@@ -378,6 +422,22 @@ Rectangle {
     if (type === "saved") return model.items && model.items.saved ? model.items.saved.length : 0
     var counts = model[type + "Counts"] || {}
     return Number(counts[section] || 0)
+  }
+
+  function newCount(section) {
+    if (section === "dashboard") return sourceIds.reduce(function(total, source) {
+      return total + count(source, "new")
+    }, 0)
+    if (section === "saved") return (model.items && model.items.saved || []).filter(function(item) {
+      return item.isNew === true
+    }).length
+    if (section === "system") return 0
+    return sourceIds.indexOf(section) >= 0 ? count(section, "new") : 0
+  }
+
+  function plural(key, count) {
+    var formatted = Commons.I18n.formatNumber(count)
+    return translations ? translations.tn(key, count).arg(formatted) : t(key).arg(formatted)
   }
 
   function dashboardItems(group) {
@@ -556,7 +616,9 @@ Rectangle {
       Rectangle {
         id: navigationPanel
         objectName: "navigationPanel"
-        Layout.preferredWidth: Style.space(root.navigationCollapsed ? 52 : 160)
+        Layout.preferredWidth: Style.space(root.navigationCollapsed ? 52 : root.navigationWidth)
+        Layout.minimumWidth: Layout.preferredWidth
+        Layout.maximumWidth: Layout.preferredWidth
         Layout.fillHeight: true
         color: Commons.Color.popups.background
         border.color: Commons.Color.popups.border
@@ -585,6 +647,7 @@ Rectangle {
                   width: navigationScroll.availableWidth
                   iconOnly: root.navigationCollapsed
                   leftPadding: Style.space(root.navigationCollapsed ? 0 : 10)
+                  rightPadding: Style.space(root.newCount(modelData) > 0 ? 24 : 8)
                   leadingIcon: root.navigationCollapsed ? "" : root.sectionIcons[modelData]
                   text: root.navigationCollapsed ? root.sectionIcons[modelData]
                     : root.sectionTitle(modelData)
@@ -593,12 +656,34 @@ Rectangle {
                         ? "  " + root.count(modelData, "unread") : "")
                   description: root.sectionTitle(modelData) + (modelData === "saved"
                     ? " · " + root.t("dashboard.saved").arg(root.count("saved", "saved")) : "")
+                    + (root.newCount(modelData) > 0 ? " · " + root.plural("nav.newItems", root.newCount(modelData)) : "")
                   highlighted: root.currentSection === modelData
+                  Rectangle {
+                    objectName: "newCountBadge_" + modelData
+                    visible: root.newCount(modelData) > 0
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    width: Math.max(Style.space(16), newBadgeText.implicitWidth + Style.space(6))
+                    height: Style.space(16)
+                    radius: height / 2
+                    color: Commons.Color.urgent
+                    Text {
+                      id: newBadgeText
+                      objectName: "newBadgeText_" + modelData
+                      anchors.centerIn: parent
+                      text: root.newCount(modelData) > 9 ? "9+" : String(root.newCount(modelData))
+                      textFormat: Text.PlainText
+                      color: Commons.Color.popups.background
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+                  }
                   Rectangle {
                     objectName: modelData === "saved" ? "savedCountBadge" : ""
                     visible: root.navigationCollapsed && modelData === "saved" && root.count("saved", "saved") > 0
                     anchors.right: parent.right
-                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
                     width: Math.max(Style.space(16), savedBadgeText.implicitWidth + Style.space(6))
                     height: Style.space(16)
                     radius: height / 2
@@ -635,20 +720,85 @@ Rectangle {
         }
       }
 
+      Item {
+        visible: !root.navigationCollapsed
+        Layout.preferredWidth: Style.space(6)
+        Layout.fillHeight: true
+        Rectangle {
+          anchors.centerIn: parent
+          width: 1
+          height: Style.space(32)
+          color: navigationResize.containsMouse || navigationResize.pressed
+            ? Commons.Color.accent : Commons.Color.popups.border
+        }
+        MouseArea {
+          id: navigationResize
+          objectName: "navigationResizeHandle"
+          anchors.fill: parent
+          enabled: !root.busy
+          hoverEnabled: true
+          cursorShape: Qt.SizeHorCursor
+          property real startX: 0
+          property int startWidth: 160
+          ToolTip.visible: containsMouse && !pressed
+          ToolTip.delay: 400
+          ToolTip.text: root.t("nav.resize")
+          onPressed: function(mouse) {
+            startX = mapToItem(root, mouse.x, mouse.y).x
+            startWidth = root.navigationWidth
+          }
+          onPositionChanged: function(mouse) {
+            if (!pressed) return
+            var delta = (mapToItem(root, mouse.x, mouse.y).x - startX)
+              * (root.LayoutMirroring.enabled ? -1 : 1)
+            root.navigationWidth = Math.max(160, Math.min(220,
+              Math.round(startWidth + delta / (Style.space(1000) / 1000))))
+          }
+          onReleased: {
+            if (root.navigationWidth !== root.savedNavigationWidth)
+              root.settingChanged("navigationWidth", String(root.navigationWidth))
+          }
+          onCanceled: root.navigationWidth = root.savedNavigationWidth
+        }
+      }
+
       ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: true
         Layout.margins: Style.space(12)
         spacing: Style.space(8)
 
-        Text {
+        RowLayout {
+          objectName: "sectionHeader"
           Layout.fillWidth: true
-          textFormat: Text.PlainText
-          text: root.sectionTitle(root.currentSection)
-          color: Commons.Color.popups.text
-          font.family: Style.font.family
-          font.pixelSize: Style.font.title
-          font.bold: true
+          Text {
+            objectName: "sectionHeading"
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            text: root.sectionTitle(root.currentSection)
+            color: Commons.Color.popups.text
+            font.family: Style.font.family
+            font.pixelSize: Style.font.title
+            font.bold: true
+            elide: Text.ElideRight
+          }
+          RowLayout {
+            visible: root.sourceIds.concat(["saved", "dashboard"]).indexOf(root.currentSection) >= 0
+            HoverButton {
+              objectName: "markAllRead"
+              text: root.t("actions.allRead")
+              description: root.currentSection === "dashboard" ? root.t("actions.allFeedsScope") : ""
+              enabled: !root.busy && root.bulkItems.length > 0
+              onClicked: root.mutationRequested("mark-all-read", root.currentSection)
+            }
+            HoverButton {
+              objectName: "markAllUnread"
+              text: root.t("actions.allUnread")
+              description: root.currentSection === "dashboard" ? root.t("actions.allFeedsScope") : ""
+              enabled: !root.busy && root.bulkItems.length > 0
+              onClicked: root.mutationRequested("mark-all-unread", root.currentSection)
+            }
+          }
         }
 
         Text {
@@ -683,6 +833,13 @@ Rectangle {
       ColumnLayout {
         width: dashboardScroll.availableWidth
         spacing: Style.space(10)
+
+        ReadingTracker {
+          visible: false
+          viewport: dashboardScroll.contentItem
+          items: root.catchUpItems.concat(root.upcomingItems, root.readingQueue)
+          rowProvider: function() { return root.collectReadRows(dashboardScroll.contentItem) }
+        }
 
         BriefingText {
           text: root.t("dashboard.subtitle")
@@ -805,10 +962,10 @@ Rectangle {
                 opacity: 0.68
               }
               Repeater {
-                model: root.catchUpItems.slice(0, root.setting("catchUpLimit", 8))
+                model: FeedModel { items: root.catchUpItems.slice(0, root.setting("catchUpLimit", 8)) }
                 delegate: BriefingItem {
-                  required property var modelData
-                  item: modelData
+                  required property var entry
+                  item: entry
                 }
               }
               BriefingText {
@@ -830,10 +987,10 @@ Rectangle {
                 opacity: 0.68
               }
               Repeater {
-                model: root.upcomingItems.slice(0, root.setting("eventsLimit", 3))
+                model: FeedModel { items: root.upcomingItems.slice(0, root.setting("eventsLimit", 3)) }
                 delegate: BriefingItem {
-                  required property var modelData
-                  item: modelData
+                  required property var entry
+                  item: entry
                 }
               }
               HoverButton {
@@ -853,10 +1010,10 @@ Rectangle {
                 opacity: 0.68
               }
               Repeater {
-                model: root.readingQueue.slice(0, root.setting("savedLimit", 4))
+                model: FeedModel { items: root.readingQueue.slice(0, root.setting("savedLimit", 4)) }
                 delegate: BriefingItem {
-                  required property var modelData
-                  item: modelData
+                  required property var entry
+                  item: entry
                 }
               }
               HoverButton {
@@ -1099,18 +1256,39 @@ Rectangle {
 
       ListView {
         id: listingScroll
+        objectName: "listingScroll"
         Layout.fillWidth: true
         Layout.fillHeight: true
         clip: true
         spacing: Style.space(root.compactRows ? 3 : 6)
-        model: root.sectionItems(root.currentSection)
+        readonly property var rows: root.sectionItems(root.currentSection)
+        readonly property string filterContext: JSON.stringify([root.currentSection,
+          root.queries[root.currentSection], root.filterTerms[root.currentSection],
+          root.dateRanges[root.currentSection]])
+        onFilterContextChanged: Qt.callLater(function() {
+          listingScroll.forceLayout()
+          listingScroll.positionViewAtBeginning()
+        })
+        model: FeedModel { items: listingScroll.rows }
+        ReadingTracker {
+          viewport: listingScroll
+          items: listingScroll.rows
+          rowProvider: function() {
+            return listingScroll.contentItem.children.filter(function(row) {
+              return row.readItem && listingScroll.itemAtIndex(row.index) === row
+            })
+          }
+        }
         delegate: Rectangle {
-          required property var modelData
+          required property int index
+          required property var entry
+          readonly property var modelData: entry
+          readonly property var readItem: modelData
           width: listingScroll.width
           implicitHeight: rowContent.implicitHeight + Style.space(root.compactRows ? 8 : 16)
           radius: Style.cornerRadius
           color: Commons.Color.popups.background
-          border.color: Commons.Color.popups.border
+          border.color: root.itemBorderColor(modelData)
           border.width: 1
 
           RowLayout {
@@ -1126,14 +1304,12 @@ Rectangle {
               Layout.preferredHeight: Style.space(root.compactRows ? 50 : 76)
               Layout.alignment: Qt.AlignVCenter
               color: "transparent"
-              border.color: Commons.Color.popups.border
-              border.width: 1
+              border.width: 0
               clip: true
 
               Image {
                 id: preview
                 anchors.fill: parent
-                anchors.margins: 1
                 source: root.showPreviews ? modelData.thumbnail || "" : ""
                 sourceSize.width: 240
                 sourceSize.height: 152
@@ -1205,8 +1381,7 @@ Rectangle {
                     : root.t("listing.unknownDate"),
                   modelData.kind === "events" ? (modelData.timestamp >= root.currentTime / 1000
                     ? root.t("listing.upcoming") : root.t("listing.started")) : "",
-                  root.isReference(modelData.kind) ? ""
-                    : modelData.isRead ? root.t("listing.read") : root.t("listing.unread")]
+                  modelData.isRead ? root.t("listing.read") : root.t("listing.unread")]
                   .filter(function(value) { return !!value }).join(" · ")
                 color: Commons.Color.popups.text
                 opacity: 0.62
@@ -1232,7 +1407,6 @@ Rectangle {
               }
               HoverButton {
                 objectName: "itemReadButton"
-                visible: !root.isReference(modelData.kind)
                 text: modelData.isRead ? root.t("actions.unread") : root.t("actions.read")
                 enabled: !root.busy
                 onClicked: root.mutationRequested("toggle-read", modelData.id)
@@ -1552,6 +1726,7 @@ Rectangle {
       title: root.t("settings.general")
       TogglePreference { settingKey: "showPreviews"; label: root.t("settings.previews") }
       TogglePreference { settingKey: "markReadOnOpen"; label: root.t("settings.markReadOnOpen") }
+      TogglePreference { settingKey: "markReadOnScroll"; label: root.t("settings.markReadOnScroll") }
       ChoicePreference {
         settingKey: "density"
         label: root.t("settings.density")
@@ -1573,6 +1748,27 @@ Rectangle {
       title: root.t("settings.refresh")
       BriefingText {
         text: root.t("settings.refreshHelp")
+        font.pixelSize: Style.font.bodySmall
+        opacity: 0.76
+      }
+      TogglePreference { settingKey: "periodicRefresh"; label: root.t("settings.periodicRefresh") }
+      TogglePreference { settingKey: "newItemNotifications"; label: root.t("settings.newItemNotifications") }
+      ChoicePreference {
+        settingKey: "refreshInterval"
+        label: root.t("settings.refreshInterval")
+        values: [10, 15, 20, 30, 45, 60]
+        labels: [10, 15, 20, 30, 45, 60].map(function(minutes) {
+          return root.t("settings.minutes").arg(minutes)
+        })
+        defaultValue: 30
+      }
+      TogglePreference {
+        settingKey: "periodicVideos"
+        label: root.t("settings.periodicVideos")
+        defaultValue: false
+      }
+      BriefingText {
+        text: root.t("settings.periodicFootnote")
         font.pixelSize: Style.font.bodySmall
         opacity: 0.76
       }

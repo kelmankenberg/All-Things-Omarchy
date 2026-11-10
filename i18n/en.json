@@ -1,5 +1,13 @@
 {
   "widget.tooltip": "All Things Omarchy",
+  "widget.newItems": {
+    "one": "All Things Omarchy: %1 new item",
+    "other": "All Things Omarchy: %1 new items"
+  },
+  "notification.newItems": {
+    "one": "%1 new Omarchy item",
+    "other": "%1 new Omarchy items"
+  },
   "window.title": "All Things Omarchy",
   "brand": "All Things Omarchy",
   "privacy.local": "Saved and read status stay on this device.",
@@ -16,8 +24,13 @@
   "nav.system": "My System",
   "nav.saved": "Saved",
   "nav.settings": "Settings",
+  "nav.newItems": {
+    "one": "%1 new item",
+    "other": "%1 new items"
+  },
   "nav.collapse": "Collapse navigation",
   "nav.expand": "Expand navigation",
+  "nav.resize": "Drag to resize navigation",
   "actions.loading": "Loading…",
   "actions.refresh": "Refresh",
   "actions.close": "Close",
@@ -32,6 +45,9 @@
   "actions.unsave": "Unsave",
   "actions.read": "Mark read",
   "actions.unread": "Mark unread",
+  "actions.allRead": "Mark all read",
+  "actions.allUnread": "Mark all unread",
+  "actions.allFeedsScope": "All loaded feed and Saved items",
   "mode.docked": "Docked",
   "mode.window": "Window",
   "mode.maximized": "Full screen",
@@ -41,7 +57,7 @@
   "dashboard.sourceAttention": "Sources need attention",
   "dashboard.retrySources": "Retry source refresh (all sources)",
   "dashboard.catchUp": "Catch up",
-  "dashboard.catchUpDescription": "New discoveries first, then unread items, balanced across sources. NEW means first discovered in the latest source refresh.",
+  "dashboard.catchUpDescription": "New discoveries first, then unread items, balanced across sources. NEW items remain marked until you mark them read.",
   "dashboard.caughtUp": "No unread items in the loaded feeds. Refresh to check for more.",
   "dashboard.moreUnread": "Showing the first %1. Browse a section for more unread items.",
   "dashboard.upcoming": "Upcoming events",
@@ -98,6 +114,7 @@
   "settings.appearance": "Appearance",
   "settings.previews": "Show previews and theme thumbnails",
   "settings.markReadOnOpen": "Mark items read when opened",
+  "settings.markReadOnScroll": "Mark items read 1 second after scrolling past them (scroll back to cancel)",
   "settings.density": "Row density",
   "settings.comfortable": "Comfortable",
   "settings.compact": "Compact",
@@ -110,7 +127,13 @@
     "other": "Remove all %1 saved items? This cannot be undone. Read history and cached feeds will not be removed."
   },
   "settings.refresh": "Refresh on open",
-  "settings.refreshHelp": "Select sources to refresh when opening. The master switch must be enabled. Manual Refresh always checks all sources; there is no timed background refresh.",
+  "settings.refreshHelp": "The source switches control refresh-on-open and scheduled feed checks. The master switch below controls refresh-on-open only. Manual Refresh always checks all sources.",
+  "settings.periodicRefresh": "Refresh feeds periodically while the shell is running",
+  "settings.newItemNotifications": "Notify me when a refresh finds new items",
+  "settings.refreshInterval": "Refresh frequency",
+  "settings.minutes": "%1 minutes",
+  "settings.periodicVideos": "Include YouTube in periodic refresh (uses additional network data)",
+  "settings.periodicFootnote": "Scheduled checks run only while the shell is running and the plugin has loaded its feed data. They use the source checkboxes below, do not check system updates, and never install anything. YouTube is excluded unless enabled above. New-item badges remain until marked read.",
   "settings.systemAuto": "Check system updates automatically on open",
   "settings.dashboardHelp": "Choose visible panels and use the arrows to reorder them.",
   "settings.moveUp": "Move panel earlier",

@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
@@ -6,6 +7,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
+import "Notifications.js" as Notifications
 
 BarWidget {
   id: root
@@ -24,7 +26,7 @@ BarWidget {
   property string status: ""
   property bool busy: false
   property bool pendingRefresh: false
-  property bool pendingRefreshOnOpen: false
+  property string pendingRefreshMode: ""
   property bool pendingSystemCheck: false
   property string pendingFilters: ""
   property string resetGroup: ""
@@ -48,6 +50,20 @@ BarWidget {
   property bool updatePending: false
   property string updateError: ""
   property string updateLog: ""
+  readonly property int newItemCount: {
+    var sections = ["plugins", "themes", "videos", "news", "releases",
+      "community", "events", "manual", "hotkeys"]
+    var total = sections.reduce(function(count, section) {
+      return count + Number(appData.newCounts[section] || 0)
+    }, 0)
+    var visibleIds = ({})
+    sections.forEach(function(section) {
+      (appData.items[section] || []).forEach(function(item) { visibleIds[item.id] = true })
+    })
+    return total + (appData.items.saved || []).filter(function(item) {
+      return item.isNew && !visibleIds[item.id]
+    }).length
+  }
 
   readonly property string helperPath: {
     var path = String(Qt.resolvedUrl("Backend.py"))
@@ -64,10 +80,13 @@ BarWidget {
     return true
   }
 
-  function refresh(onOpen) {
-    var automatic = onOpen === true
-    if (!runHelper(automatic ? ["fetch", "on-open"] : ["fetch"])) {
-      pendingRefreshOnOpen = pendingRefresh ? pendingRefreshOnOpen && automatic : automatic
+  function refresh(mode) {
+    var fetchMode = mode === "on-open" || mode === "scheduled" ? mode : "manual"
+    var args = fetchMode === "manual" ? ["fetch"] : ["fetch", fetchMode]
+    if (!runHelper(args)) {
+      var priorities = ({ scheduled: 1, "on-open": 2, manual: 3 })
+      if (!pendingRefresh || priorities[fetchMode] > priorities[pendingRefreshMode])
+        pendingRefreshMode = fetchMode
       pendingRefresh = true
       return
     }
@@ -112,14 +131,14 @@ BarWidget {
 
   function loadContent() {
     if (!dataLoaded) {
-      if (appData.settings.refreshOnOpen !== false) pendingRefresh = true
-      pendingRefreshOnOpen = true
+      pendingRefresh = appData.settings.refreshOnOpen !== false
+      pendingRefreshMode = pendingRefresh ? "on-open" : ""
       pendingSystemCheck = true
       runHelper(["load"])
       return
     }
     if (appData.settings.systemCheckOnOpen !== false) refreshSystem()
-    if (appData.settings.refreshOnOpen !== false) refresh(true)
+    if (appData.settings.refreshOnOpen !== false) refresh("on-open")
   }
 
   function applyPayload(exitCode, output, errorOutput) {
@@ -129,6 +148,9 @@ BarWidget {
       if (exitCode !== 0 || payload.error) {
         status = payload.error || errorMessage(errorOutput, "Could not update Omarchy sources.")
       } else {
+        var wasLoaded = dataLoaded
+        if (helperAction === "fetch" && wasLoaded)
+          notifyNewItems(appData.items || ({}), payload.items || ({}), payload.settings || ({}))
         if (!dataLoaded) restoreFilters(payload.filters || {})
         appData = payload
         dataLoaded = true
@@ -142,6 +164,22 @@ BarWidget {
       status = errorMessage(errorOutput, "The source response could not be read.")
     }
     Qt.callLater(function() { root.flushPendingWork() })
+  }
+
+  function notifyNewItems(previousItems, nextItems, settings) {
+    var sections = ["plugins", "themes", "videos", "news", "releases",
+      "manual", "hotkeys", "community", "events"]
+    var counts = Notifications.newlyDiscovered(previousItems, nextItems, sections,
+      settings.newItemNotifications !== false)
+    var total = sections.reduce(function(sum, section) { return sum + counts[section] }, 0)
+    if (total === 0) return
+    var body = sections.filter(function(section) { return counts[section] > 0 })
+      .map(function(section) {
+        return Notifications.escapeMarkup(strings.t("nav." + section)) + ": "
+          + Commons.I18n.formatNumber(counts[section])
+      }).join("\n")
+    var title = strings.tn("notification.newItems", total).arg(Commons.I18n.formatNumber(total))
+    Util.execArgv(["omarchy-notification-send", "--app-name", "All Things Omarchy", title, body])
   }
 
   function loadDisplayPreference() {
@@ -318,10 +356,10 @@ BarWidget {
       return
     }
     if (pendingRefresh) {
-      var automatic = pendingRefreshOnOpen
+      var mode = pendingRefreshMode || "manual"
       pendingRefresh = false
-      pendingRefreshOnOpen = false
-      refresh(automatic)
+      pendingRefreshMode = ""
+      refresh(mode)
     }
   }
 
@@ -336,6 +374,14 @@ BarWidget {
     id: filterSaveTimer
     interval: 500
     onTriggered: root.flushPendingWork()
+  }
+
+  Timer {
+    id: periodicRefreshTimer
+    interval: Math.max(10, Math.min(60, Number(root.appData.settings.refreshInterval) || 30)) * 60000
+    running: root.dataLoaded && root.appData.settings.periodicRefresh !== false
+    repeat: true
+    onTriggered: root.refresh("scheduled")
   }
 
   function updateDataSetting(key, value) {
@@ -496,7 +542,9 @@ BarWidget {
     function setMode(mode: string) { root.setMode(mode) }
     function status(): string {
       return JSON.stringify({ mode: root.displayMode, docked: root.dockedOpen,
-        visible: window.visible, fullscreen: window.fullscreen })
+        visible: window.visible, fullscreen: window.fullscreen, dataLoaded: root.dataLoaded,
+        periodicRefresh: periodicRefreshTimer.running, refreshIntervalMs: periodicRefreshTimer.interval,
+        newItems: root.newItemCount })
     }
   }
 
@@ -517,7 +565,11 @@ BarWidget {
     hasVisualContent: true
     fixedWidth: vertical ? barSize : Style.bar.iconSlot
     fixedHeight: vertical ? Style.bar.iconSlot : barSize
-    tooltipText: strings.t("widget.tooltip")
+    active: root.newItemCount > 0
+    activeColor: Commons.Color.accent
+    tooltipText: root.newItemCount > 0
+      ? strings.tn("widget.newItems", root.newItemCount).arg(Commons.I18n.formatNumber(root.newItemCount))
+      : strings.t("widget.tooltip")
     Item {
       anchors.centerIn: parent
       width: Style.bar.iconSize
@@ -533,7 +585,7 @@ BarWidget {
           height: parent.height * 0.1
           radius: height / 2
           rotation: modelData
-          color: button.foreground
+          color: button.active ? button.activeColor : button.foreground
           antialiasing: true
         }
       }
@@ -549,7 +601,7 @@ BarWidget {
           x: parent.width * modelData.x - width / 2
           y: parent.height * modelData.y - height / 2
           radius: width / 2
-          color: button.foreground
+          color: button.active ? button.activeColor : button.foreground
           antialiasing: true
         }
       }
@@ -558,7 +610,7 @@ BarWidget {
         width: parent.width * 0.38
         height: width
         radius: width / 2
-        color: Commons.Color.accent
+        color: button.active ? Commons.Color.urgent : Commons.Color.accent
         antialiasing: true
       }
     }
@@ -609,6 +661,7 @@ BarWidget {
       onFilterTermsEdited: function(section, value) { root.updateFilterTerms(section, value) }
       onDateRangeChanged: function(section, value) { root.updateDateRange(section, value) }
       onMutationRequested: function(action, itemId) { root.mutate([action, itemId]) }
+      readingActive: root.dockedOpen
       onSettingChanged: function(key, value) { root.updateDataSetting(key, value) }
       onSettingsResetRequested: function(group) { root.resetSettings(group) }
       onClearSavedRequested: root.mutate(["clear-saved"])
@@ -631,6 +684,7 @@ BarWidget {
     minimumSize: Qt.size(Style.space(640), Style.space(440))
 
     AppContent {
+      id: windowView
       anchors.fill: parent
       translations: strings
       model: root.appData
@@ -659,6 +713,7 @@ BarWidget {
       onFilterTermsEdited: function(section, value) { root.updateFilterTerms(section, value) }
       onDateRangeChanged: function(section, value) { root.updateDateRange(section, value) }
       onMutationRequested: function(action, itemId) { root.mutate([action, itemId]) }
+      readingActive: window.visible && windowView.Window.active
       onSettingChanged: function(key, value) { root.updateDataSetting(key, value) }
       onSettingsResetRequested: function(group) { root.resetSettings(group) }
       onClearSavedRequested: root.mutate(["clear-saved"])

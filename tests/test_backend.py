@@ -576,6 +576,34 @@ else:
         self.assertEqual("compact", settings["density"])
         self.assertEqual("saved,events,catchup,system", settings["dashboardOrder"])
         self.assertNotIn("savedLimit", settings)
+        periodic = backend.valid_settings({"refreshInterval": "60", "periodicRefresh": "false"})
+        self.assertEqual(60, periodic["refreshInterval"])
+        self.assertIs(periodic["periodicRefresh"], False)
+        self.assertIs(backend.empty_state()["settings"]["newItemNotifications"], True)
+        self.assertIs(backend.valid_settings({"newItemNotifications": "false"})["newItemNotifications"], False)
+        self.assertNotIn("refreshInterval", backend.valid_settings({"refreshInterval": "9"}))
+
+    def test_navigation_width_is_bounded_persisted_and_reset_with_appearance(self):
+        for width in (160, 190, 220):
+            self.assertEqual(width, backend.valid_settings({"navigationWidth": str(width)})["navigationWidth"])
+        for width in (159, 221, "190.5", True):
+            self.assertNotIn("navigationWidth", backend.valid_settings({"navigationWidth": width}))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(backend, "state_path", return_value=Path(directory) / "state.json"):
+            backend.save_state(backend.empty_state())
+            with patch.object(sys, "argv", ["Backend.py", "set-setting", "navigationWidth", "220"]), \
+                    patch("builtins.print"):
+                backend.main()
+            self.assertEqual(220, backend.load_state()["settings"]["navigationWidth"])
+            original = backend.state_path().read_bytes()
+            with patch.object(sys, "argv", ["Backend.py", "set-setting", "navigationWidth", "221"]):
+                with self.assertRaises(ValueError):
+                    backend.main()
+            self.assertEqual(original, backend.state_path().read_bytes())
+            with patch.object(sys, "argv", ["Backend.py", "reset-settings", "general"]), \
+                    patch("builtins.print"):
+                backend.main()
+            self.assertEqual(160, backend.load_state()["settings"]["navigationWidth"])
 
     def test_filters_round_trip_opt_out_and_group_resets_preserve_history(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -611,6 +639,84 @@ else:
                 backend.mutate(final, "reset-settings")
             self.assertEqual("comfortable", backend.load_state()["settings"]["density"])
             self.assertEqual(["news:old"], backend.load_state()["readIds"])
+            reset = backend.load_state()
+            reset["settings"]["newItemNotifications"] = False
+            backend.save_state(reset)
+            with patch.object(sys, "argv", ["Backend.py", "reset-settings", "refresh"]), \
+                    patch("builtins.print"):
+                backend.mutate(reset, "reset-settings")
+            self.assertIs(backend.load_state()["settings"]["newItemNotifications"], True)
+
+    def test_bulk_read_actions_cover_whole_section_and_saved_items(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(backend, "state_path", return_value=Path(directory) / "state.json"):
+            state = backend.empty_state()
+            first = {"id": "news:first", "kind": "news", "name": "First",
+                     "url": "https://omarchy.org/news/first/"}
+            hidden = {"id": "news:hidden", "kind": "news", "name": "Hidden",
+                      "url": "https://omarchy.org/news/hidden/"}
+            other = {"id": "plugins:other", "kind": "plugins", "name": "Other",
+                     "url": "https://github.com/example/plugin"}
+            state["sources"]["news"] = {"items": [first, hidden], "fetchedAt": 1}
+            state["sources"]["plugins"] = {"items": [other], "fetchedAt": 1}
+            state["savedItems"] = [hidden, other]
+            state["filters"] = {"news": {"query": "First", "terms": [], "range": "all"}}
+            state["readIds"] = [other["id"]]
+            state["newIds"] = [first["id"], hidden["id"]]
+            with patch.object(sys, "argv", ["Backend.py", "mark-all-read", "news"]), \
+                    patch("builtins.print"):
+                backend.mutate(state, "mark-all-read")
+            restored = backend.load_state()
+            self.assertEqual({first["id"], hidden["id"], other["id"]}, set(restored["readIds"]))
+            self.assertEqual([], restored["newIds"])
+            self.assertTrue(backend.public_state(restored)["items"]["saved"][0]["isRead"])
+            with patch.object(sys, "argv", ["Backend.py", "mark-all-unread", "news"]), \
+                    patch("builtins.print"):
+                backend.mutate(restored, "mark-all-unread")
+            self.assertEqual([other["id"]], backend.load_state()["readIds"])
+            with patch.object(sys, "argv", ["Backend.py", "mark-all-unread", "saved"]), \
+                    patch("builtins.print"):
+                backend.main()
+            self.assertEqual([], backend.load_state()["readIds"])
+            self.assertEqual([], backend.load_state()["newIds"])
+            self.assertEqual(state["filters"], backend.load_state()["filters"])
+            with patch.object(sys, "argv", ["Backend.py", "mark-all-read", "dashboard"]), \
+                    patch("builtins.print"):
+                backend.main()
+            self.assertEqual({first["id"], hidden["id"], other["id"]},
+                             set(backend.load_state()["readIds"]))
+            with patch.object(sys, "argv", ["Backend.py", "mark-all-unread", "dashboard"]), \
+                    patch("builtins.print"):
+                backend.main()
+            self.assertEqual([], backend.load_state()["readIds"])
+
+    def test_scroll_read_batch_is_persisted_and_rejects_invalid_input(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(backend, "state_path", return_value=Path(directory) / "state.json"):
+            state = backend.empty_state()
+            state["savedItems"] = [{"id": "news:saved", "kind": "news", "name": "Saved",
+                                    "url": "https://omarchy.org/news/saved/"}]
+            state["sources"]["manual"] = {"items": [
+                {"id": "manual:first", "kind": "manual", "name": "Manual",
+                 "url": "https://omarchy.org/manual/hotkeys/"}], "fetchedAt": 1}
+            state["newIds"] = ["news:saved"]
+            backend.save_state(state)
+            for command, argument in (
+                    ("mark-all-read", "system"), ("mark-all-unread", "unknown"),
+                    ("mark-read-items", "{}"), ("mark-read-items", "[]"),
+                    ("mark-read-items", '["news:missing"]'), ("mark-read-items", "[7]"),
+                    ("mark-read-items", json.dumps(["news:saved"] * 201))):
+                original = backend.state_path().read_bytes()
+                with patch.object(sys, "argv", ["Backend.py", command, argument]):
+                    with self.assertRaises(ValueError):
+                        backend.main()
+                self.assertEqual(original, backend.state_path().read_bytes())
+            with patch.object(sys, "argv", ["Backend.py", "mark-read-items",
+                                           '["news:saved","manual:first"]']), patch("builtins.print"):
+                backend.main()
+            restored = backend.load_state()
+            self.assertEqual({"news:saved", "manual:first"}, set(restored["readIds"]))
+            self.assertEqual([], restored["newIds"])
 
     def test_invalid_filter_updates_do_not_overwrite_persisted_state(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -665,9 +771,23 @@ else:
             self.assertIn("plugins", fetch.call_args.args[1])
             with patch.object(sys, "argv", ["Backend.py", "fetch"]):
                 backend.main()
-            self.assertEqual(backend.SOURCE_KEYS, fetch.call_args.args[1])
+            self.assertEqual(list(backend.SOURCE_KEYS), fetch.call_args.args[1])
             state["settings"]["refreshOnOpen"] = False
             with patch.object(sys, "argv", ["Backend.py", "fetch", "on-open"]):
+                backend.main()
+            self.assertEqual([], fetch.call_args.args[1])
+            state["settings"]["refreshOnOpen"] = True
+            state["settings"]["periodicVideos"] = False
+            with patch.object(sys, "argv", ["Backend.py", "fetch", "scheduled"]):
+                backend.main()
+            self.assertNotIn("videos", fetch.call_args.args[1])
+            self.assertIn("plugins", fetch.call_args.args[1])
+            state["settings"]["periodicVideos"] = True
+            with patch.object(sys, "argv", ["Backend.py", "fetch", "scheduled"]):
+                backend.main()
+            self.assertIn("videos", fetch.call_args.args[1])
+            state["settings"]["periodicRefresh"] = False
+            with patch.object(sys, "argv", ["Backend.py", "fetch", "scheduled"]):
                 backend.main()
             self.assertEqual([], fetch.call_args.args[1])
 
@@ -692,6 +812,30 @@ else:
             fetch.reset_mock()
             backend.perform_fetch(state, [])
             fetch.assert_not_called()
+
+    def test_new_items_stay_new_until_read_and_badges_use_unread_new_counts(self):
+        state = backend.empty_state()
+        state["baselineEstablished"] = True
+        state["knownIds"] = ["news:old"]
+        state["sources"]["news"] = {
+            "items": [{"id": "news:old", "kind": "news", "name": "Old",
+                       "url": "https://omarchy.org/news/old/"}],
+            "fetchedAt": 1,
+        }
+        row = {"id": "news:new", "kind": "news", "name": "New item",
+               "url": "https://omarchy.org/news/new/"}
+        with patch.object(backend, "fetch_source", side_effect=lambda key, settings:
+                          ([row] if key == "news" else [], "")), patch.object(backend, "save_state"):
+            first = backend.perform_fetch(state)
+            self.assertEqual(1, first["newCounts"]["news"])
+            second = backend.perform_fetch(state)
+            self.assertTrue(second["items"]["news"][0]["isNew"])
+            self.assertEqual(1, second["newCounts"]["news"])
+            with patch.object(sys, "argv", ["Backend.py", "mark-read", "news:new"]), patch("builtins.print"):
+                backend.mutate(state, "mark-read")
+            acknowledged = backend.public_state(state)
+        self.assertFalse(acknowledged["items"]["news"][0]["isNew"])
+        self.assertEqual(0, acknowledged["newCounts"]["news"])
 
     def test_local_state_round_trips_saved_and_read_items(self):
         with tempfile.TemporaryDirectory() as directory:
