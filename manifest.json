@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "kel.all-things-omarchy",
   "name": "All Things Omarchy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Kelly",
   "license": "MIT",
   "description": "A customizable Omarchy dashboard for plugins, themes, news, videos, releases, documentation, meetups, saved items, and system status.",
