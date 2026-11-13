@@ -62,19 +62,33 @@ Rectangle {
   property string currentSection: "dashboard"
   property string currentSettingsSection: "general"
   property string displayMode: windowMode ? "window" : "docked"
-  readonly property var sectionIds: ["dashboard", "plugins", "themes", "videos", "news",
-    "releases", "manual", "hotkeys", "community", "events", "system", "saved", "settings"]
+  readonly property var optionalSectionIds: ["plugins", "themes", "videos", "news",
+    "releases", "manual", "hotkeys", "community", "events", "system"]
+  readonly property var sectionIds: ["dashboard"].concat(optionalSectionIds.filter(function(section) {
+    return root.sectionEnabled(section)
+  }), ["saved", "settings"])
   readonly property var rangeIds: ["all", "today", "week", "month"]
   readonly property var briefingSources: ["plugins", "themes", "videos", "news", "releases", "community"]
   readonly property var sourceIds: briefingSources.concat(["events", "manual", "hotkeys"])
-  readonly property var settingsSections: ["general", "refresh", "dashboard"].concat(sourceIds, ["saved"])
+  readonly property var visibleSourceIds: sourceIds.filter(function(section) {
+    return root.sectionEnabled(section)
+  })
+  readonly property var visibleBriefingSources: briefingSources.filter(function(section) {
+    return root.sectionEnabled(section)
+  })
+  readonly property var settingsSections: ["general", "sections", "refresh", "dashboard"]
+    .concat(visibleSourceIds, ["saved"])
   readonly property bool compactRows: setting("density", "comfortable") === "compact"
   readonly property bool showPreviews: setting("showPreviews", true)
   readonly property var dashboardOrder: String(setting("dashboardOrder", "system,catchup,events,saved")).split(",")
+  readonly property var visibleDashboardPanels: dashboardOrder.filter(function(panel) {
+    return (panel !== "system" || root.sectionEnabled("system"))
+      && (panel !== "events" || root.sectionEnabled("events"))
+  })
   readonly property var catchUpItems: dashboardItems("catchUp")
   readonly property var upcomingItems: dashboardItems("events")
   readonly property var readingQueue: dashboardItems("saved")
-  readonly property var sourceIssues: sourceIds.filter(function(section) {
+  readonly property var sourceIssues: visibleSourceIds.filter(function(section) {
     return !!(root.model.errors || {})[section]
   })
   readonly property var sectionIcons: ({
@@ -313,12 +327,17 @@ Rectangle {
     return settings[key] === undefined ? fallback : settings[key]
   }
 
+  function sectionEnabled(section) {
+    return optionalSectionIds.indexOf(section) < 0 || setting("section_" + section, true) !== false
+  }
+
   function itemBorderColor(item) {
     return item.isRead === true ? Commons.Color.muted : Commons.Color.popups.border
   }
 
   function settingsSectionTitle(section) {
     return section === "general" ? t("settings.appearance")
+      : section === "sections" ? t("settings.sections")
       : section === "refresh" ? t("settings.refresh") : sectionTitle(section)
   }
 
@@ -329,15 +348,19 @@ Rectangle {
 
   function moveDashboardPanel(panel, offset) {
     var order = dashboardOrder.slice()
-    var index = order.indexOf(panel)
+    var visiblePanels = visibleDashboardPanels
+    var index = visiblePanels.indexOf(panel)
     var other = index + offset
-    if (index < 0 || other < 0 || other >= order.length) return
-    order[index] = order[other]
-    order[other] = panel
+    if (index < 0 || other < 0 || other >= visiblePanels.length) return
+    var orderIndex = order.indexOf(panel)
+    var otherOrderIndex = order.indexOf(visiblePanels[other])
+    order[orderIndex] = order[otherOrderIndex]
+    order[otherOrderIndex] = panel
     settingChanged("dashboardOrder", order.join(","))
   }
 
   function sectionItems(section) {
+    if (!sectionEnabled(section)) return []
     var items = model.items ? model.items[section] : []
     var undated = section === "themes" || section === "community" || isReference(section)
     var ordered = undated || section === "events"
@@ -358,7 +381,7 @@ Rectangle {
 
   function allLoadedItems() {
     var rows = []
-    sourceIds.concat(["saved"]).forEach(function(section) {
+    visibleSourceIds.concat(["saved"]).forEach(function(section) {
       rows = rows.concat((root.model.items || {})[section] || [])
     })
     return rows
@@ -425,7 +448,7 @@ Rectangle {
   }
 
   function newCount(section) {
-    if (section === "dashboard") return sourceIds.reduce(function(total, source) {
+    if (section === "dashboard") return visibleSourceIds.reduce(function(total, source) {
       return total + count(source, "new")
     }, 0)
     if (section === "saved") return (model.items && model.items.saved || []).filter(function(item) {
@@ -442,14 +465,14 @@ Rectangle {
 
   function dashboardItems(group) {
     var items = root.model.items || {}
-    if (group === "events") return (items.events || []).filter(function(item) {
+    if (group === "events") return sectionEnabled("events") ? (items.events || []).filter(function(item) {
       return Number(item.timestamp) > root.currentTime / 1000
-    }).slice().sort(function(a, b) { return Number(a.timestamp) - Number(b.timestamp) })
+    }).slice().sort(function(a, b) { return Number(a.timestamp) - Number(b.timestamp) }) : []
     if (group === "saved") return (items.saved || []).filter(function(item) {
       return !item.isRead
     })
     var rows = []
-    root.briefingSources.forEach(function(section, sourceIndex) {
+    root.visibleBriefingSources.forEach(function(section, sourceIndex) {
       if (!root.setting("dashboardSource_" + section, true)) return
       var sourceRows = (items[section] || []).filter(function(item) {
         return !item.isRead && (!root.setting("dashboardNewOnly", false) || item.isNew)
@@ -487,12 +510,23 @@ Rectangle {
   }
 
   function setSection(section) {
-    if (sectionIds.indexOf(section) < 0) return
+    if (sectionIds.indexOf(section) < 0) {
+      if (optionalSectionIds.indexOf(section) >= 0) currentSection = "dashboard"
+      return
+    }
     var changed = currentSection !== section
     currentSection = section
     filterNotice = ""
     if (changed && (section === "system" || section === "dashboard")
-        && setting("systemCheckOnOpen", true)) systemRequested()
+        && sectionEnabled("system") && setting("systemCheckOnOpen", true)) systemRequested()
+  }
+
+  onSectionIdsChanged: {
+    if (sectionIds.indexOf(currentSection) < 0) currentSection = "dashboard"
+  }
+  onSettingsSectionsChanged: {
+    if (settingsSections.indexOf(currentSettingsSection) < 0)
+      currentSettingsSection = "sections"
   }
 
   function openItem(item) {
@@ -564,6 +598,7 @@ Rectangle {
         OutlineButton {
           objectName: "toolbarRefreshButton"
           visible: root.currentSection !== "settings"
+            && (root.visibleSourceIds.length > 0 || root.sectionEnabled("system"))
           enabled: root.currentSection === "system"
             ? !root.systemBusy && !root.themeBusy && !root.updateLaunching : !root.busy
           iconOnly: true
@@ -575,7 +610,8 @@ Rectangle {
             if (root.currentSection === "system") root.systemRequested()
             else {
               root.refreshRequested()
-              if (root.currentSection === "dashboard") root.systemRequested()
+              if (root.currentSection === "dashboard" && root.sectionEnabled("system"))
+                root.systemRequested()
             }
           }
         }
@@ -928,7 +964,7 @@ Rectangle {
           columnSpacing: Style.space(10)
           rowSpacing: Style.space(10)
           Repeater {
-            model: root.dashboardOrder.filter(function(panel) {
+            model: root.visibleDashboardPanels.filter(function(panel) {
               return root.setting("dashboard_" + (panel === "catchup" ? "catchUp" : panel), true)
             })
             delegate: Loader {
@@ -1025,8 +1061,9 @@ Rectangle {
         }
         BriefingPanel {
           title: root.t("dashboard.sourceFreshness")
+          visible: root.visibleSourceIds.length > 0
           Repeater {
-            model: root.sourceIds
+            model: root.visibleSourceIds
             delegate: RowLayout {
               required property string modelData
               Layout.fillWidth: true
@@ -1674,6 +1711,7 @@ Rectangle {
               objectName: "settingsNav_" + modelData
               width: settingsNavigation.availableWidth
               readonly property string sectionIcon: modelData === "general" ? "\uf1de"
+                : modelData === "sections" ? "\uf0c0"
                 : modelData === "refresh" ? "\uf021" : root.sectionIcons[modelData]
               iconOnly: settingsLayout.compactNavigation
               leadingIcon: iconOnly ? "" : sectionIcon
@@ -1711,6 +1749,7 @@ Rectangle {
             objectName: "settingsContent"
             Layout.fillWidth: true
             sourceComponent: root.currentSettingsSection === "general" ? appearanceSettings
+              : root.currentSettingsSection === "sections" ? sectionVisibilitySettings
               : root.currentSettingsSection === "refresh" ? refreshSettings
               : root.currentSettingsSection === "dashboard" ? dashboardSettings : sectionSettings
             onLoaded: settingsScroll.contentItem.contentY = 0
@@ -1743,6 +1782,56 @@ Rectangle {
   }
 
   Component {
+    id: sectionVisibilitySettings
+    ColumnLayout {
+      Layout.fillWidth: true
+      spacing: Style.space(10)
+      BriefingPanel {
+        title: root.t("settings.sections")
+        BriefingText {
+          text: root.t("settings.sectionsHelp")
+          font.pixelSize: Style.font.bodySmall
+          opacity: 0.76
+        }
+        BriefingText { text: root.t("settings.sectionFeeds"); font.bold: true }
+        Repeater {
+          model: root.briefingSources.concat(["events"])
+          delegate: TogglePreference {
+            required property string modelData
+            settingKey: "section_" + modelData
+            label: root.sectionTitle(modelData)
+          }
+        }
+      }
+      BriefingPanel {
+        title: root.t("settings.sectionReference")
+        Repeater {
+          model: ["manual", "hotkeys", "system"]
+          delegate: TogglePreference {
+            required property string modelData
+            settingKey: "section_" + modelData
+            label: root.sectionTitle(modelData)
+          }
+        }
+      }
+      BriefingPanel {
+        title: root.t("settings.alwaysAvailable")
+        BriefingText {
+          text: [root.sectionTitle("dashboard"), root.sectionTitle("saved"),
+            root.sectionTitle("settings")].join(" · ")
+          wrapMode: Text.Wrap
+        }
+      }
+      HoverButton {
+        objectName: "reset_sections"
+        text: root.t("settings.defaults")
+        enabled: !root.busy
+        onClicked: root.settingsResetRequested("sections")
+      }
+    }
+  }
+
+  Component {
     id: refreshSettings
     BriefingPanel {
       title: root.t("settings.refresh")
@@ -1763,6 +1852,7 @@ Rectangle {
         defaultValue: 30
       }
       TogglePreference {
+        visible: root.sectionEnabled("videos")
         settingKey: "periodicVideos"
         label: root.t("settings.periodicVideos")
         defaultValue: false
@@ -1774,14 +1864,18 @@ Rectangle {
       }
       TogglePreference { settingKey: "refreshOnOpen"; label: root.t("settings.refreshOnOpen") }
       Repeater {
-        model: root.sourceIds
+        model: root.visibleSourceIds
         delegate: TogglePreference {
           required property string modelData
           settingKey: "refresh_" + modelData
           label: root.sectionTitle(modelData)
         }
       }
-      TogglePreference { settingKey: "systemCheckOnOpen"; label: root.t("settings.systemAuto") }
+      TogglePreference {
+        visible: root.sectionEnabled("system")
+        settingKey: "systemCheckOnOpen"
+        label: root.t("settings.systemAuto")
+      }
       HoverButton {
         objectName: "reset_refresh"
         text: root.t("settings.defaults")
@@ -1801,7 +1895,7 @@ Rectangle {
         opacity: 0.76
       }
       Repeater {
-        model: root.dashboardOrder
+        model: root.visibleDashboardPanels
         delegate: RowLayout {
           required property string modelData
           required property int index
@@ -1821,7 +1915,7 @@ Rectangle {
             objectName: "dashboardDown_" + parent.modelData
             text: "\uf063"
             description: root.t("settings.moveDown")
-            enabled: !root.busy && parent.index < root.dashboardOrder.length - 1
+            enabled: !root.busy && parent.index < root.visibleDashboardPanels.length - 1
             onClicked: root.moveDashboardPanel(parent.modelData, 1)
           }
         }
@@ -1831,6 +1925,7 @@ Rectangle {
         values: [4, 8, 12, 16]; defaultValue: 8
       }
       ChoicePreference {
+        visible: root.sectionEnabled("events")
         settingKey: "eventsLimit"; label: root.t("settings.eventsLimit")
         values: [1, 3, 5]; defaultValue: 3
       }
@@ -1843,7 +1938,7 @@ Rectangle {
       }
       BriefingText { text: root.t("settings.dashboardSources"); font.bold: true }
       Repeater {
-        model: root.briefingSources
+        model: root.visibleBriefingSources
         delegate: TogglePreference {
           required property string modelData
           settingKey: "dashboardSource_" + modelData

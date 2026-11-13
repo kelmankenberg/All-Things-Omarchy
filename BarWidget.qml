@@ -50,9 +50,12 @@ BarWidget {
   property bool updatePending: false
   property string updateError: ""
   property string updateLog: ""
+  readonly property var enabledFeedSections: ["plugins", "themes", "videos", "news",
+    "releases", "manual", "hotkeys", "community", "events"].filter(function(section) {
+    return root.appData.settings["section_" + section] !== false
+  })
   readonly property int newItemCount: {
-    var sections = ["plugins", "themes", "videos", "news", "releases",
-      "community", "events", "manual", "hotkeys"]
+    var sections = root.enabledFeedSections
     var total = sections.reduce(function(count, section) {
       return count + Number(appData.newCounts[section] || 0)
     }, 0)
@@ -93,8 +96,12 @@ BarWidget {
     status = ""
   }
 
+  function sectionEnabled(section) {
+    return appData.settings["section_" + section] !== false
+  }
+
   function refreshSystem() {
-    if (updateLaunching) return
+    if (updateLaunching || !sectionEnabled("system")) return
     updatePending = false
     updateError = ""
     if (!themeHelper.running) {
@@ -112,7 +119,7 @@ BarWidget {
   }
 
   function launchUpdate() {
-    if (updateLaunching || updatePending || systemBusy || systemError
+    if (!sectionEnabled("system") || updateLaunching || updatePending || systemBusy || systemError
         || !systemData.update || systemData.update.status !== "available") return
     updateError = ""
     updateLaunching = true
@@ -121,7 +128,7 @@ BarWidget {
   }
 
   function selectTheme(name) {
-    if (themeHelper.running || !name) return
+    if (!sectionEnabled("system") || themeHelper.running || !name) return
     themeError = ""
     themeAction = "set"
     themeBusy = true
@@ -137,7 +144,7 @@ BarWidget {
       runHelper(["load"])
       return
     }
-    if (appData.settings.systemCheckOnOpen !== false) refreshSystem()
+    if (sectionEnabled("system") && appData.settings.systemCheckOnOpen !== false) refreshSystem()
     if (appData.settings.refreshOnOpen !== false) refresh("on-open")
   }
 
@@ -157,7 +164,8 @@ BarWidget {
         status = ""
         if (pendingSystemCheck) {
           pendingSystemCheck = false
-          if (appData.settings.systemCheckOnOpen !== false) refreshSystem()
+          if (sectionEnabled("system") && appData.settings.systemCheckOnOpen !== false)
+            refreshSystem()
         }
       }
     } catch (error) {
@@ -167,8 +175,7 @@ BarWidget {
   }
 
   function notifyNewItems(previousItems, nextItems, settings) {
-    var sections = ["plugins", "themes", "videos", "news", "releases",
-      "manual", "hotkeys", "community", "events"]
+    var sections = enabledFeedSections
     var counts = Notifications.newlyDiscovered(previousItems, nextItems, sections,
       settings.newItemNotifications !== false)
     var total = sections.reduce(function(sum, section) { return sum + counts[section] }, 0)
@@ -379,7 +386,8 @@ BarWidget {
   Timer {
     id: periodicRefreshTimer
     interval: Math.max(10, Math.min(60, Number(root.appData.settings.refreshInterval) || 30)) * 60000
-    running: root.dataLoaded && root.appData.settings.periodicRefresh !== false
+    running: root.dataLoaded && root.enabledFeedSections.length > 0
+      && root.appData.settings.periodicRefresh !== false
     repeat: true
     onTriggered: root.refresh("scheduled")
   }
@@ -571,47 +579,45 @@ BarWidget {
       ? strings.tn("widget.newItems", root.newItemCount).arg(Commons.I18n.formatNumber(root.newItemCount))
       : strings.t("widget.tooltip")
     Item {
+      id: dashboardIcon
       anchors.centerIn: parent
       width: Style.bar.iconSize
       height: width
       scale: button.pressScale
+      readonly property bool animateNewItems: button.active && Style.duration(180) > 0
+      onAnimateNewItemsChanged: {
+        if (!animateNewItems) rotation = 0
+      }
 
-      Repeater {
-        model: [45, -45]
-        delegate: Rectangle {
-          required property int modelData
-          anchors.centerIn: parent
-          width: parent.width * 0.9
-          height: parent.height * 0.1
-          radius: height / 2
-          rotation: modelData
-          color: button.active ? button.activeColor : button.foreground
-          antialiasing: true
+      SequentialAnimation on rotation {
+        running: dashboardIcon.animateNewItems
+        loops: Animation.Infinite
+        PauseAnimation { duration: 2000 }
+        NumberAnimation {
+          from: 0
+          to: 90
+          duration: Style.duration(180)
+          easing.type: Easing.OutCubic
         }
       }
+
       Repeater {
         model: [
-          { x: 0.16, y: 0.16 }, { x: 0.84, y: 0.16 },
-          { x: 0.16, y: 0.84 }, { x: 0.84, y: 0.84 }
+          { x: 0.08, y: 0.08 }, { x: 0.55, y: 0.08 },
+          { x: 0.08, y: 0.55 }, { x: 0.55, y: 0.55 }
         ]
         delegate: Rectangle {
           required property var modelData
-          width: parent.width * 0.25
+          width: parent.width * 0.37
           height: width
-          x: parent.width * modelData.x - width / 2
-          y: parent.height * modelData.y - height / 2
-          radius: width / 2
-          color: button.active ? button.activeColor : button.foreground
+          x: parent.width * modelData.x
+          y: parent.height * modelData.y
+          radius: width * 0.15
+          color: button.active ? button.activeColor : "transparent"
+          border.width: button.active ? 0 : 1
+          border.color: button.foreground
           antialiasing: true
         }
-      }
-      Rectangle {
-        anchors.centerIn: parent
-        width: parent.width * 0.38
-        height: width
-        radius: width / 2
-        color: button.active ? Commons.Color.urgent : Commons.Color.accent
-        antialiasing: true
       }
     }
     onPressed: {

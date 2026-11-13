@@ -579,6 +579,10 @@ else:
         periodic = backend.valid_settings({"refreshInterval": "60", "periodicRefresh": "false"})
         self.assertEqual(60, periodic["refreshInterval"])
         self.assertIs(periodic["periodicRefresh"], False)
+        sections = backend.valid_settings({"section_plugins": "false", "section_system": "false"})
+        self.assertIs(sections["section_plugins"], False)
+        self.assertIs(sections["section_system"], False)
+        self.assertIs(backend.empty_state()["settings"]["section_plugins"], True)
         self.assertIs(backend.empty_state()["settings"]["newItemNotifications"], True)
         self.assertIs(backend.valid_settings({"newItemNotifications": "false"})["newItemNotifications"], False)
         self.assertNotIn("refreshInterval", backend.valid_settings({"refreshInterval": "9"}))
@@ -604,6 +608,13 @@ else:
                     patch("builtins.print"):
                 backend.main()
             self.assertEqual(160, backend.load_state()["settings"]["navigationWidth"])
+            hidden = backend.load_state()
+            hidden["settings"]["section_plugins"] = False
+            backend.save_state(hidden)
+            with patch.object(sys, "argv", ["Backend.py", "reset-settings", "sections"]), \
+                    patch("builtins.print"):
+                backend.main()
+            self.assertIs(backend.load_state()["settings"]["section_plugins"], True)
 
     def test_filters_round_trip_opt_out_and_group_resets_preserve_history(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -689,6 +700,40 @@ else:
                     patch("builtins.print"):
                 backend.main()
             self.assertEqual([], backend.load_state()["readIds"])
+
+    def test_dashboard_bulk_actions_skip_hidden_feeds_but_include_their_saved_items(self):
+        for command in ("mark-all-read", "mark-all-unread"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory, \
+                    patch.object(backend, "state_path", return_value=Path(directory) / "state.json"):
+                state = backend.empty_state()
+                visible = {"id": "news:visible", "kind": "news", "name": "Visible",
+                           "url": "https://omarchy.org/news/visible/"}
+                hidden = {"id": "plugin:hidden", "kind": "plugins", "name": "Hidden",
+                          "url": "https://github.com/example/hidden"}
+                saved = {"id": "plugin:saved", "kind": "plugins", "name": "Saved",
+                         "url": "https://github.com/example/saved"}
+                state["settings"]["section_plugins"] = False
+                state["sources"]["news"] = {"items": [visible], "fetchedAt": 1}
+                state["sources"]["plugins"] = {"items": [hidden, saved], "fetchedAt": 1}
+                state["savedItems"] = [saved]
+                all_ids = {visible["id"], hidden["id"], saved["id"]}
+                state["readIds"] = sorted(all_ids) if command == "mark-all-unread" else []
+                state["newIds"] = [] if command == "mark-all-unread" else sorted(all_ids)
+                backend.save_state(state)
+                original = backend.load_state()
+
+                with patch.object(sys, "argv", ["Backend.py", command, "dashboard"]), \
+                        patch("builtins.print"):
+                    backend.main()
+
+                restored = backend.load_state()
+                expected_read = {hidden["id"]} if command == "mark-all-unread" \
+                    else {visible["id"], saved["id"]}
+                self.assertEqual(expected_read, set(restored["readIds"]))
+                self.assertEqual([] if command == "mark-all-unread" else [hidden["id"]],
+                                 restored["newIds"])
+                self.assertEqual(original["sources"], restored["sources"])
+                self.assertIs(restored["settings"]["section_plugins"], False)
 
     def test_scroll_read_batch_is_persisted_and_rejects_invalid_input(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -790,6 +835,31 @@ else:
             with patch.object(sys, "argv", ["Backend.py", "fetch", "scheduled"]):
                 backend.main()
             self.assertEqual([], fetch.call_args.args[1])
+
+    def test_hidden_sections_are_excluded_from_all_refresh_modes_and_direct_fetches(self):
+        state = backend.empty_state()
+        state["settings"]["section_news"] = False
+        state["sources"]["news"] = {
+            "items": [{"id": "news:cached", "kind": "news", "name": "Cached",
+                       "url": "https://omarchy.org/news/cached/"}],
+            "fetchedAt": 123,
+            "message": "",
+        }
+        for args in (["fetch"], ["fetch", "on-open"], ["fetch", "scheduled"]):
+            with self.subTest(args=args), \
+                    patch.object(backend, "load_state", return_value=state), \
+                    patch.object(backend, "perform_fetch", return_value={}) as fetch, \
+                    patch("builtins.print"):
+                with patch.object(sys, "argv", ["Backend.py"] + args):
+                    backend.main()
+                self.assertNotIn("news", fetch.call_args.args[1])
+                self.assertIn("plugins", fetch.call_args.args[1])
+
+        with patch.object(backend, "fetch_source") as fetch, patch.object(backend, "save_state"):
+            result = backend.perform_fetch(state, ["news"])
+        fetch.assert_not_called()
+        self.assertEqual("Cached", result["items"]["news"][0]["name"])
+        self.assertEqual(123, result["lastFetched"]["news"])
 
     def test_selective_refresh_keeps_unselected_cache_and_new_flags(self):
         state = backend.empty_state()

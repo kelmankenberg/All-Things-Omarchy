@@ -71,6 +71,7 @@ SETTING_VALUES = {
 }
 SOURCE_KEYS = ("plugins", "themes", "videos", "news", "releases", "manual", "hotkeys",
                "community", "events")
+OPTIONAL_SECTIONS = SOURCE_KEYS + ("system",)
 FILTER_SECTIONS = SOURCE_KEYS + ("saved",)
 DASHBOARD_PANELS = ("system", "catchUp", "events", "saved")
 DEFAULT_SETTINGS.update({
@@ -79,6 +80,7 @@ DEFAULT_SETTINGS.update({
     "systemCheckOnOpen": True, "periodicRefresh": True, "refreshInterval": 30,
     "newItemNotifications": True,
     "periodicVideos": False,
+    **{"section_" + section: True for section in OPTIONAL_SECTIONS},
     "dashboardOrder": ",".join(DASHBOARD_PANELS), "dashboardNewOnly": False,
     "catchUpLimit": 8, "eventsLimit": 3, "savedLimit": 4,
     **{"refresh_" + section: True for section in SOURCE_KEYS},
@@ -102,6 +104,7 @@ SETTING_VALUES.update({
 DEFAULT_SETTINGS["dashboardOrder"] = DEFAULT_SETTINGS["dashboardOrder"].lower()
 SETTING_GROUPS = {
     "general": {"showPreviews", "density", "markReadOnOpen", "markReadOnScroll", "navigationWidth"},
+    "sections": {"section_" + section for section in OPTIONAL_SECTIONS},
     "dashboard": {key for key in DEFAULT_SETTINGS if key.startswith("dashboard")
                   or key in ("catchUpLimit", "eventsLimit", "savedLimit")},
     "refresh": {"refreshOnOpen", "systemCheckOnOpen", "periodicRefresh", "refreshInterval",
@@ -1207,6 +1210,7 @@ def perform_fetch(state, sources=None):
     selected = set(SOURCE_KEYS if sources is None else sources)
     if not selected <= set(SOURCE_KEYS):
         raise ValueError("Invalid refresh sources.")
+    selected = {key for key in selected if state["settings"].get("section_" + key, True)}
     if not selected:
         return public_state(state)
     updated = {}
@@ -1298,7 +1302,9 @@ def mutate(state, command):
             if section not in FILTER_SECTIONS + ("dashboard",):
                 raise ValueError("Choose a valid item section.")
             if section == "dashboard":
-                items = [item for source in state["sources"].values() for item in source["items"]]
+                items = [item for key, source in state["sources"].items()
+                         if state["settings"].get("section_" + key, True)
+                         for item in source["items"]]
                 items += state["savedItems"]
             else:
                 items = state["savedItems"] if section == "saved" else state["sources"].get(
@@ -1600,15 +1606,17 @@ def main():
             raise ValueError("fetch accepts only on-open or scheduled mode.")
         mode = sys.argv[2] if len(sys.argv) == 3 else "manual"
         selected = state["settings"]
+        enabled_sources = [key for key in SOURCE_KEYS
+                           if selected.get("section_" + key, True)]
         if mode == "on-open":
-            sources = [key for key in SOURCE_KEYS if selected.get("refresh_" + key, True)] \
+            sources = [key for key in enabled_sources if selected.get("refresh_" + key, True)] \
                 if selected["refreshOnOpen"] else []
         elif mode == "scheduled":
-            sources = [key for key in SOURCE_KEYS if selected.get("refresh_" + key, True)
+            sources = [key for key in enabled_sources if selected.get("refresh_" + key, True)
                        and (key != "videos" or selected.get("periodicVideos", False))] \
                 if selected.get("periodicRefresh", True) else []
         else:
-            sources = list(SOURCE_KEYS)
+            sources = enabled_sources
         payload = perform_fetch(state, sources)
         result = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
         if len(result.encode("utf-8")) > MAX_OUTPUT_BYTES:

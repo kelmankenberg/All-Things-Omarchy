@@ -155,6 +155,62 @@ TestCase {
     verify(!read.visible)
   }
 
+  function test_hidden_sections_leave_pinned_navigation_and_dashboard_content() {
+    var plugin = item("Cached plugin", "", "plugins")
+    var news = item("Visible news", "", "news")
+    var event = Object.assign(item("Cached event", "", "events"), { timestamp: 300000 })
+    app.model = ({
+      settings: { section_plugins: false, section_events: false, section_system: false },
+      items: { plugins: [plugin], news: [news], events: [event] },
+      errors: { plugins: "offline", events: "offline" }
+    })
+    verify(app.sectionIds.indexOf("plugins") < 0)
+    verify(app.sectionIds.indexOf("events") < 0)
+    verify(app.sectionIds.indexOf("system") < 0)
+    verify(app.sectionIds.indexOf("news") >= 0)
+    verify(app.sectionIds.indexOf("dashboard") >= 0)
+    verify(app.sectionIds.indexOf("saved") >= 0)
+    verify(app.sectionIds.indexOf("settings") >= 0)
+    compare(app.catchUpItems.map(function(row) { return row.id }).join("|"), news.id)
+    compare(app.upcomingItems.length, 0)
+    verify(app.sourceIssues.indexOf("plugins") < 0)
+    verify(app.sourceIssues.indexOf("events") < 0)
+    compare(app.visibleDashboardPanels.join("|"), "catchup|saved")
+    app.setSection("plugins")
+    compare(app.currentSection, "dashboard")
+    verify(findChild(app, "dashboardPanel_system") === null)
+    verify(findChild(app, "dashboardPanel_events") === null)
+
+    app.setSection("news")
+    app.model = Object.assign({}, app.model, {
+      settings: Object.assign({}, app.model.settings, { section_news: false })
+    })
+    tryCompare(app, "currentSection", "dashboard")
+  }
+
+  function test_section_settings_control_visibility_and_hide_detail_pages() {
+    app.model = Object.assign({}, fixtureModel, { settings: ({}) })
+    app.setSection("settings")
+    var sections = findChild(app, "settingsNav_sections")
+    verify(sections !== null)
+    sections.clicked()
+    var pluginToggle = findChild(app, "setting_section_plugins")
+    verify(pluginToggle !== null && pluginToggle.checked)
+    pluginToggle.checked = false
+    pluginToggle.toggled()
+    compare(lastSetting, "section_plugins:false")
+    verify(findChild(app, "settingsNav_plugins") === null)
+    verify(findChild(app, "setting_remember_plugins") === null)
+    pluginToggle = findChild(app, "setting_section_plugins")
+    verify(pluginToggle !== null && !pluginToggle.checked)
+    pluginToggle.checked = true
+    pluginToggle.toggled()
+    compare(lastSetting, "section_plugins:true")
+    verify(findChild(app, "settingsNav_plugins") !== null)
+    findChild(app, "reset_sections").clicked()
+    compare(lastReset, "sections")
+  }
+
   function prepareScrollReading(settings) {
     var rows = []
     for (var index = 0; index < 30; index++)

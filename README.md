@@ -16,9 +16,9 @@ sessions; collapsed navigation stays at 52 pixels.
 
 ## Sections
 
-- **Dashboard** is an actionable briefing: Omarchy package update status and
-  update/check controls, source errors with a retry-all button, eight new/unread
-  items across feeds, the next three meetups, and four saved unread items.
+- **Dashboard** is an actionable briefing: enabled feed source errors with a
+  retry button, new/unread items from enabled feeds, and configurable system,
+  events, and saved-item panels.
   Items offer Open, Save/Unsave, and Mark Read actions; source refresh times
   show when cached content was last successfully fetched. NEW means newly
   discovered by a feed refresh, not necessarily published since your last
@@ -50,8 +50,9 @@ sessions; collapsed navigation stays at 52 pixels.
 - **My System** shows the installed Omarchy version, current theme, and Omarchy
   package update status. Its theme dropdown shows local theme previews (or a
   fallback icon) and applies an installed theme using `omarchy theme set`.
-  Unless automatic system checks are disabled in Settings, opening the plugin
-  or entering Dashboard or My System runs a read-only update check.
+  When My System is enabled and automatic checks are enabled in Settings,
+  opening the plugin or entering Dashboard or My System runs a read-only update
+  check.
   Their manual check/refresh controls always run that check
   against configured package mirrors; it does not install anything. Development
   checkout updates are not checked. Errors are shown rather than treated as
@@ -72,7 +73,7 @@ sessions; collapsed navigation stays at 52 pixels.
   Read items use the theme's muted secondary color for their card borders;
   marking an item unread restores the primary borders. Thumbnails have no border.
   Read-status updates preserve the list's scroll position.
-  Dashboard provides the same actions for all loaded feed and Saved items,
+  Dashboard provides the same actions for all loaded enabled-feed and Saved items,
   and also marks viewed briefing items read after scrolling past them.
 - **Settings** groups appearance/reading, refresh, dashboard, and section
   preferences in its own left navigation, showing only the selected category.
@@ -82,8 +83,14 @@ sessions; collapsed navigation stays at 52 pixels.
   scrolled past.
   Dashboard panels can be hidden/reordered, with configurable item counts,
   included catch-up sources, and a new-only mode.
-  Refresh-on-open has a master switch and individual source switches; manual
-  Refresh still checks all sources. Scheduled feed refresh is enabled by
+  Settings → Sections controls which optional feeds and tools appear in the
+  main navigation. Hidden sections pause refresh-on-open, scheduled, manual,
+  and Dashboard retry checks, and stop My System checks when hidden. Their
+  cached items, filters, read state, and bookmarks are retained; saved items
+  remain accessible under Saved. Hidden sections' detailed settings are also
+  removed until re-enabled. Dashboard, Saved, and Settings are always available.
+  Refresh-on-open has a master switch and individual visible-source switches;
+  manual Refresh checks all visible feeds. Scheduled feed refresh is enabled by
   default every 30 minutes and can be disabled or set to 10, 15, 20, 30, 45,
   or 60 minutes. It runs only after feeds have been loaded, while the shell is
   running, and respects the source switches. YouTube is excluded by default
@@ -138,10 +145,14 @@ results are not a complete archive. Items without a date appear only under
 All time. Refresh after changing the YouTube result limit.
 
 Read status, saved items, settings, and cached listings are stored locally in
-``${XDG_STATE_HOME:-~/.local/state}/all-things-omarchy/state.json`. Display
+`${XDG_STATE_HOME:-~/.local/state}/all-things-omarchy/state.json`. Display
 preferences are stored beside it in `display.json`. Search text
-is local and is not sent to the sources. The plugin does not run background
-refreshes, install downloaded content, or use credentials.
+is local and is not sent to the sources. Scheduled background feed refresh is
+enabled by default every 30 minutes after feed data has loaded, while the shell
+is running. It can be disabled or adjusted from 10 to 60 minutes in Settings →
+Refresh; YouTube is opt-in. Hidden sections are excluded from all feed refreshes.
+Scheduled refreshes never check system packages or install updates. The plugin
+does not install downloaded content or use credentials.
 
 ## Install and remove
 
