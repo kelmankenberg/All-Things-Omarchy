@@ -211,6 +211,24 @@ TestCase {
     compare(lastReset, "sections")
   }
 
+  function test_help_shows_installed_version_and_opens_prefilled_issue_forms() {
+    app.model = Object.assign({}, fixtureModel, { pluginVersion: "0.2.0+test &preview" })
+    app.setSection("settings")
+    findChild(app, "settingsNav_help").clicked()
+    var version = findChild(app, "pluginVersionLabel")
+    compare(version.text, app.t("settings.pluginVersion").arg(app.pluginVersion))
+    compare(version.textFormat, Text.PlainText)
+    findChild(app, "reportBugButton").clicked()
+    compare(openedUrl, "https://github.com/kelmankenberg/All-Things-Omarchy/issues/new"
+      + "?template=bug_report.yml&plugin_version=0.2.0%2Btest%20%26preview")
+    findChild(app, "requestFeatureButton").clicked()
+    compare(openedUrl, "https://github.com/kelmankenberg/All-Things-Omarchy/issues/new"
+      + "?template=feature_request.yml&plugin_version=0.2.0%2Btest%20%26preview")
+    app.model = fixtureModel
+    verify(!findChild(app, "reportBugButton").enabled)
+    verify(!findChild(app, "requestFeatureButton").enabled)
+  }
+
   function prepareScrollReading(settings) {
     var rows = []
     for (var index = 0; index < 30; index++)

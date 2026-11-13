@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest an improvement to All Things Omarchy.
+title: "[Feature]: "
+body:
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+      description: Find this in the plugin under Settings > Help & About.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would this help you do?
+      description: Describe the need or problem behind your request.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed feature
+      description: Explain what you would like to change and how it should work.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or other approaches you have tried.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples or screenshots if useful. Remove personal information before posting; GitHub issues are public.

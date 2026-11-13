@@ -1160,6 +1160,14 @@ def fetch_source(key, settings):
     raise ValueError("Unknown source.")
 
 
+def plugin_version():
+    manifest = json.loads(Path(__file__).with_name("manifest.json").read_text(encoding="utf-8"))
+    version = manifest.get("version") if isinstance(manifest, dict) else None
+    if not isinstance(version, str) or not version.strip() or len(version) > 64:
+        raise ValueError("The plugin manifest does not contain a valid version.")
+    return version
+
+
 def public_state(state, errors=None):
     read_ids = set(state["readIds"])
     saved_by_id = {item["id"]: item for item in state["savedItems"]}
@@ -1190,6 +1198,7 @@ def public_state(state, errors=None):
         saved_items.append(item)
     output_items["saved"] = saved_items
     return {
+        "pluginVersion": plugin_version(),
         "items": output_items,
         "unreadCounts": unread_counts,
         "newCounts": new_counts,

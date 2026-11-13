@@ -28,6 +28,17 @@ class TextTests(unittest.TestCase):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_public_version_comes_from_installed_manifest_and_rejects_missing_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.json"
+            with patch.object(backend, "__file__", str(Path(directory) / "Backend.py")):
+                manifest.write_text(json.dumps({"version": "0.2.0+test"}), encoding="utf-8")
+                self.assertEqual("0.2.0+test",
+                                 backend.public_state(backend.empty_state())["pluginVersion"])
+                manifest.write_text("{}", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "valid version"):
+                    backend.public_state(backend.empty_state())
+
     def test_update_launcher_is_detached_interactive_and_reports_startup_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)

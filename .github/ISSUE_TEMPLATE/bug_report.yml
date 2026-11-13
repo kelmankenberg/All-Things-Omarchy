@@ -1,0 +1,43 @@
+name: Bug report
+description: Report a problem with All Things Omarchy.
+title: "[Bug]: "
+body:
+  - type: input
+    id: plugin_version
+    attributes:
+      label: Plugin version
+      description: Find this in the plugin under Settings > Help & About.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the problem and which section or display mode is affected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Explain how to reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: input
+    id: omarchy_version
+    attributes:
+      label: Omarchy version
+      description: If available, include the output of omarchy version.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots or relevant errors can help. Remove personal information, credentials, and private URLs before posting; GitHub issues are public.

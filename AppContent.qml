@@ -77,7 +77,8 @@ Rectangle {
     return root.sectionEnabled(section)
   })
   readonly property var settingsSections: ["general", "sections", "refresh", "dashboard"]
-    .concat(visibleSourceIds, ["saved"])
+    .concat(visibleSourceIds, ["saved", "help"])
+  readonly property string pluginVersion: String(model.pluginVersion || "")
   readonly property bool compactRows: setting("density", "comfortable") === "compact"
   readonly property bool showPreviews: setting("showPreviews", true)
   readonly property var dashboardOrder: String(setting("dashboardOrder", "system,catchup,events,saved")).split(",")
@@ -338,7 +339,14 @@ Rectangle {
   function settingsSectionTitle(section) {
     return section === "general" ? t("settings.appearance")
       : section === "sections" ? t("settings.sections")
+      : section === "help" ? t("settings.help")
       : section === "refresh" ? t("settings.refresh") : sectionTitle(section)
+  }
+
+  function reportIssue(template) {
+    if (!pluginVersion || ["bug_report.yml", "feature_request.yml"].indexOf(template) < 0) return
+    openUrlRequested("https://github.com/kelmankenberg/All-Things-Omarchy/issues/new?template="
+      + template + "&plugin_version=" + encodeURIComponent(pluginVersion))
   }
 
   function dashboardPanelTitle(panel) {
@@ -1712,6 +1720,7 @@ Rectangle {
               width: settingsNavigation.availableWidth
               readonly property string sectionIcon: modelData === "general" ? "\uf1de"
                 : modelData === "sections" ? "\uf0c0"
+                : modelData === "help" ? "\uf059"
                 : modelData === "refresh" ? "\uf021" : root.sectionIcons[modelData]
               iconOnly: settingsLayout.compactNavigation
               leadingIcon: iconOnly ? "" : sectionIcon
@@ -1750,11 +1759,41 @@ Rectangle {
             Layout.fillWidth: true
             sourceComponent: root.currentSettingsSection === "general" ? appearanceSettings
               : root.currentSettingsSection === "sections" ? sectionVisibilitySettings
+              : root.currentSettingsSection === "help" ? helpSettings
               : root.currentSettingsSection === "refresh" ? refreshSettings
               : root.currentSettingsSection === "dashboard" ? dashboardSettings : sectionSettings
             onLoaded: settingsScroll.contentItem.contentY = 0
           }
         }
+      }
+    }
+  }
+
+  Component {
+    id: helpSettings
+    BriefingPanel {
+      title: root.t("settings.help")
+      BriefingText {
+        objectName: "pluginVersionLabel"
+        text: root.pluginVersion ? root.t("settings.pluginVersion").arg(root.pluginVersion)
+          : root.t("actions.loading")
+      }
+      BriefingText {
+        text: root.t("settings.feedbackHelp")
+        font.pixelSize: Style.font.bodySmall
+        opacity: 0.76
+      }
+      HoverButton {
+        objectName: "reportBugButton"
+        text: root.t("settings.reportBug")
+        enabled: root.pluginVersion !== ""
+        onClicked: root.reportIssue("bug_report.yml")
+      }
+      HoverButton {
+        objectName: "requestFeatureButton"
+        text: root.t("settings.requestFeature")
+        enabled: root.pluginVersion !== ""
+        onClicked: root.reportIssue("feature_request.yml")
       }
     }
   }

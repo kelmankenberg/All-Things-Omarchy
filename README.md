@@ -110,6 +110,17 @@ sessions; collapsed navigation stays at 52 pixels.
 Marketplace entries open their public listing or upstream GitHub repository.
 This plugin does not install plugins or themes.
 
+## Bug reports and feature requests
+
+Open **Settings → Help & About** to see the installed plugin version and choose
+**Report a bug** or **Request a feature**. Each button opens the corresponding
+GitHub issue form with the plugin version prefilled. You review and submit the
+form yourself; the plugin does not upload diagnostics automatically.
+
+You can also use the [repository's issue forms](https://github.com/kelmankenberg/All-Things-Omarchy/issues/new/choose).
+Issues are public: remove personal information and credentials from screenshots
+and logs before attaching them.
+
 ## Sources and network use
 
 The plugin contacts these fixed HTTPS sources when opened (if refresh-on-open

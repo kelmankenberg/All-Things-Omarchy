@@ -4,6 +4,9 @@
 
 ### Added
 
+- Bug report and feature request forms on GitHub, accessible from Settings →
+  Help & About. The installed manifest version is displayed and prefilled in
+  both forms; no diagnostics are uploaded automatically.
 - A root `preview.png` screenshot of the Dashboard for the marketplace listing.
 - A Settings → Sections category to show or hide optional feed, reference, and
   system sections. Hidden sections disappear from navigation and Dashboard
