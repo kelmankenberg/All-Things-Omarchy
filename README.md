@@ -137,9 +137,16 @@ and that source is enabled; YouTube is opt-in), or when **Refresh** is selected:
 - `https://omarchy.org/meetups/`
 - YouTube search through the installed `yt-dlp`
 
-While browsing, visible rows load previews from the plugin marketplace,
+While browsing, visible rows request previews from the plugin marketplace,
 `i.ytimg.com`, or `omarchy.org`, when available, including meetup images. Previously saved theme
-previews can still refer to the former theme preview CDN.
+previews can still refer to the former theme preview CDN. Remote previews pass
+through a private local cache before the shell displays them: at most 2 MiB per
+transfer, a 15-second download deadline, and at most 4096 pixels per dimension
+and 8 megapixels. The cache retains at most 64 images and 32 MiB. Static PNG,
+JPEG, and WebP previews are supported; animated or unsupported formats are
+rejected. Local theme previews use the same dimension limits and a 16 MiB read
+limit. A failed preview shows a placeholder and an error; the listing remains
+usable.
 
 Catalog responses are limited to 32 MiB and listings to 10,000 items per
 source. If the official themes page is unavailable, cached entries remain
@@ -158,7 +165,16 @@ All time. Refresh after changing the YouTube result limit.
 Read status, saved items, settings, and cached listings are stored locally in
 `${XDG_STATE_HOME:-~/.local/state}/all-things-omarchy/state.json`. Display
 preferences are stored beside it in `display.json`. Search text
-is local and is not sent to the sources. Scheduled background feed refresh is
+is local and is not sent to the sources. Type filter text directly: clipboard
+paste and input-method composition are disabled in the filter field to prevent
+Qt's automatic clipboard retrieval from blocking the shared shell. Ordinary
+keyboard editing, selection, and filter chips remain available.
+
+Local state reads and subprocess output are bounded. State files use private,
+owner-controlled paths, and writes are serialized across helper processes.
+Helpers have whole-operation deadlines and explicitly report failures.
+
+Scheduled background feed refresh is
 enabled by default every 30 minutes after feed data has loaded, while the shell
 is running. It can be disabled or adjusted from 10 to 60 minutes in Settings →
 Refresh; YouTube is opt-in. Hidden sections are excluded from all feed refreshes.
@@ -191,7 +207,8 @@ Removal retains saved items, read history, and preferences in the local state
 directory documented above. No shell configuration is overwritten by an
 installer script.
 
-The plugin requires the Omarchy Quickshell and Python 3. Searching YouTube
+The plugin requires the Omarchy Quickshell, Python 3, and GNU `timeout` from
+`coreutils` (included with Omarchy). Searching YouTube
 requires `yt-dlp`; it is not installed automatically. The package update check
 requires `checkupdates` from `pacman-contrib` and uses its temporary package database.
 
@@ -201,8 +218,19 @@ requires `checkupdates` from `pacman-contrib` and uses its temporary package dat
 python3 -m unittest discover -s tests
 QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -import tests/mocks -input tests
 omarchy plugin validate .
-qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml AppContent.qml
+qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml AppContent.qml BoundedProcess.qml ClipboardFreeInput.qml
 ```
+
+The native helper lifecycle regression needs Quickshell's built-in IO module:
+
+```sh
+cp tests/process-runtime.qml .process-runtime.qml
+QT_QPA_PLATFORM=offscreen timeout 15s quickshell --no-color -p .process-runtime.qml
+rm .process-runtime.qml
+```
+
+It prints `PROCESS TEST PASSED` after exercising failed-start recovery and an
+operation deadline.
 
 ## License
 

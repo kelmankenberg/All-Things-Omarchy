@@ -2,20 +2,27 @@
 
 import hashlib
 import base64
+import fcntl
 import html
 import json
+import locale
 import os
 import re
+import selectors
+import signal
 import shutil
+import stat
+import struct
 import subprocess
 import sys
-import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -165,13 +172,134 @@ def clean_plain_text(value, limit=MAX_TEXT_LENGTH):
     return " ".join(value.split())[:limit]
 
 
-def state_path():
+def bounded_json(value):
+    result = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+    if len(result) + 1 > MAX_OUTPUT_BYTES:
+        raise ValueError("The combined data response exceeded the output limit.")
+    return result
+
+
+def emit_json(value):
+    print(bounded_json(value))
+
+
+MAX_STATE_BYTES = 16 * 1024 * 1024
+STATE_LOCK_NAME = ".state.lock"
+STATE_LOCK_TIMEOUT = 5
+MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+MAX_LOCAL_PREVIEW_BYTES = 16 * 1024 * 1024
+THUMBNAIL_TIMEOUT = 15
+MAX_THUMBNAIL_DIMENSION = 4096
+MAX_THUMBNAIL_PIXELS = 8 * 1024 * 1024
+MAX_CACHE_FILES = 64
+MAX_CACHE_BYTES = 32 * 1024 * 1024
+
+
+def state_base_dir():
     state_home = os.environ.get("XDG_STATE_HOME")
     if state_home:
         base = Path(state_home)
     else:
         base = Path.home() / ".local" / "state"
-    return base / "all-things-omarchy" / "state.json"
+    return base.absolute() / "all-things-omarchy"
+
+
+def state_path():
+    return state_base_dir() / "state.json"
+
+
+def state_lock_path():
+    return state_path().with_name(STATE_LOCK_NAME)
+
+
+@contextmanager
+def private_directory(path):
+    """Pin each directory component without following symlinks."""
+    path = Path(path).absolute()
+    owner = os.getuid()
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in path.parts[1:]:
+            ancestor = os.fstat(descriptor)
+            if ancestor.st_uid not in (0, owner):
+                raise RuntimeError("The local plugin state directory has the wrong owner.")
+            if (ancestor.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                    and not (ancestor.st_uid == 0 and ancestor.st_mode & stat.S_ISVTX)):
+                raise RuntimeError("The local plugin state directory has an unsafe writable ancestor.")
+            if component in (".", ".."):
+                raise RuntimeError("The local plugin state directory is unsafe.")
+            try:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        if info.st_uid != owner:
+            raise RuntimeError("The local plugin state directory has the wrong owner.")
+        os.fchmod(descriptor, 0o700)
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def private_file(directory, name, flags, create=False):
+    try:
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        if not create:
+            raise
+    else:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise RuntimeError("The local plugin state file is not a private regular file.")
+    descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | (os.O_CREAT if create else 0), 0o600, dir_fd=directory)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise RuntimeError("The local plugin state file is not a private regular file.")
+        os.fchmod(descriptor, 0o600)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def bounded_file_read(path, limit):
+    with private_directory(path.parent) as directory:
+        descriptor = private_file(directory, path.name, os.O_RDONLY)
+        with os.fdopen(descriptor, "rb") as source:
+            raw = source.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("The local plugin state file is too large.")
+    return raw
+
+
+@contextmanager
+def advisory_lock(path, timeout=STATE_LOCK_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    with private_directory(path.parent) as directory:
+        descriptor = private_file(directory, path.name, os.O_RDWR, create=True)
+        try:
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError("Timed out waiting for the local plugin state lock.")
+                    time.sleep(min(0.05, remaining))
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
 
 def empty_state():
@@ -191,14 +319,16 @@ def empty_state():
 def load_state():
     path = state_path()
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = bounded_file_read(path, MAX_STATE_BYTES)
     except FileNotFoundError:
         return empty_state()
+    except ValueError as error:
+        raise RuntimeError("The local plugin state file is too large.") from error
     except OSError as error:
         raise RuntimeError("Could not read the local plugin state.") from error
     try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as error:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("The local plugin state is invalid; move or repair its state file.") from error
     if not isinstance(value, dict) or value.get("version") != 1:
         raise RuntimeError("The local plugin state has an unsupported format.")
@@ -228,22 +358,35 @@ def load_state():
 
 
 def write_state_file(path, state):
+    raw = json.dumps(state, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if len(raw) > MAX_STATE_BYTES:
+        raise ValueError("The local plugin state file is too large.")
+    atomic_private_write(path, raw)
+
+
+def atomic_private_write(path, raw):
     try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(prefix=".state-", dir=str(path.parent))
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                json.dump(state, output, ensure_ascii=True, separators=(",", ":"))
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, path)
-        except BaseException:
+        with private_directory(path.parent) as directory:
             try:
-                os.unlink(temporary)
+                existing = private_file(directory, path.name, os.O_RDONLY)
             except FileNotFoundError:
                 pass
-            raise
+            else:
+                os.close(existing)
+            temporary = ".state-" + os.urandom(16).hex()
+            descriptor = private_file(directory, temporary, os.O_WRONLY | os.O_EXCL, create=True)
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
     except OSError as error:
         raise RuntimeError("Could not save the local plugin state.") from error
 
@@ -267,14 +410,13 @@ def validate_display(value):
 def load_display():
     path = state_path().with_name("display.json")
     try:
-        with path.open("rb") as source:
-            raw = source.read(4097)
+        raw = bounded_file_read(path, 4096)
     except FileNotFoundError:
         return dict(DEFAULT_DISPLAY)
+    except ValueError as error:
+        raise ValueError("The saved display preference is too large.") from error
     except OSError as error:
         raise RuntimeError("Could not read the saved display preference.") from error
-    if len(raw) > 4096:
-        raise ValueError("The saved display preference is too large.")
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -445,6 +587,203 @@ def safe_thumbnail(kind, value):
         "events": r"/images/meetups/evt-[A-Za-z0-9]+-full\.webp",
     }
     return url if re.fullmatch(patterns[kind], parsed.path, re.IGNORECASE) else ""
+
+
+def valid_thumbnail(value):
+    if (not isinstance(value, str) or not value.startswith("https://")
+            or any(ord(char) < 33 for char in value)):
+        return ""
+    return value if any(safe_thumbnail(kind, value) == value
+                        for kind in ("plugins", "themes", "videos", "news", "events")) else ""
+
+
+class ThumbnailRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        target = valid_thumbnail(new_url)
+        if (not target or urllib.parse.urlsplit(target).hostname
+                != urllib.parse.urlsplit(request.full_url).hostname):
+            raise ValueError("The thumbnail redirected outside its allowlist.")
+        return super().redirect_request(request, response, code, message, headers, target)
+
+
+def download_thumbnail_bytes(url):
+    if not valid_thumbnail(url):
+        raise ValueError("The thumbnail URL is not allowed.")
+    deadline = time.monotonic() + THUMBNAIL_TIMEOUT
+    opener = urllib.request.build_opener(ThumbnailRedirectHandler())
+    request = urllib.request.Request(url, headers={"User-Agent": "AllThingsOmarchy/0.1"})
+    with opener.open(request, timeout=THUMBNAIL_TIMEOUT) as response:
+        if (not valid_thumbnail(response.geturl()) or urllib.parse.urlsplit(response.geturl()).hostname
+                != urllib.parse.urlsplit(url).hostname):
+            raise ValueError("The thumbnail redirected outside its allowlist.")
+        length = response.headers.get("Content-Length")
+        if length is not None and (int(length) < 0 or int(length) > MAX_THUMBNAIL_BYTES):
+            raise ValueError("The thumbnail exceeded the size limit.")
+        body = bytearray()
+        while True:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The thumbnail download timed out.")
+            chunk = response.read1(min(65536, MAX_THUMBNAIL_BYTES + 1 - len(body)))
+            if not chunk:
+                return bytes(body)
+            body.extend(chunk)
+            if len(body) > MAX_THUMBNAIL_BYTES:
+                raise ValueError("The thumbnail exceeded the size limit.")
+
+
+def thumbnail_dimensions(body):
+    """Inspect encoded dimensions without allocating a decoded pixel buffer."""
+    dimensions = []
+    if body.startswith(b"\x89PNG\r\n\x1a\n"):
+        offset = 8
+        if len(body) < 33 or body[12:16] != b"IHDR" or body[8:12] != b"\0\0\0\r":
+            raise ValueError("The thumbnail PNG header is invalid.")
+        dimensions.append(struct.unpack(">II", body[16:24]))
+        while offset + 12 <= len(body):
+            length = int.from_bytes(body[offset:offset + 4], "big")
+            kind = body[offset + 4:offset + 8]
+            if offset + 12 + length > len(body) or kind == b"acTL":
+                raise ValueError("The thumbnail PNG is truncated or animated.")
+            if kind == b"IHDR" and offset != 8:
+                raise ValueError("The thumbnail PNG has multiple image headers.")
+            offset += 12 + length
+            if kind == b"IEND":
+                break
+        else:
+            raise ValueError("The thumbnail PNG is incomplete.")
+    elif body.startswith(b"\xff\xd8"):
+        offset = 2
+        while offset < len(body):
+            if body[offset] != 255:
+                raise ValueError("The thumbnail JPEG header is invalid.")
+            while offset < len(body) and body[offset] == 255:
+                offset += 1
+            if offset >= len(body):
+                break
+            marker = body[offset]
+            offset += 1
+            if marker in (0xDA, 0xD9):
+                break
+            if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+                continue
+            length = int.from_bytes(body[offset:offset + 2], "big")
+            if length < 2 or offset + length > len(body):
+                raise ValueError("The thumbnail JPEG is truncated.")
+            if marker in (0xC0, 0xC1, 0xC2):
+                if length < 8:
+                    raise ValueError("The thumbnail JPEG frame is invalid.")
+                height, width = struct.unpack(">HH", body[offset + 3:offset + 7])
+                dimensions.append((width, height))
+            elif marker in (0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                raise ValueError("The thumbnail JPEG frame format is unsupported.")
+            offset += length
+        if len(dimensions) != 1:
+            raise ValueError("The thumbnail JPEG image header is missing or ambiguous.")
+    elif body.startswith(b"RIFF") and body[8:12] == b"WEBP":
+        if len(body) < 20 or int.from_bytes(body[4:8], "little") + 8 != len(body):
+            raise ValueError("The thumbnail WebP container is invalid.")
+        offset = 12
+        frame_count = 0
+        while offset + 8 <= len(body):
+            kind = body[offset:offset + 4]
+            length = int.from_bytes(body[offset + 4:offset + 8], "little")
+            data = body[offset + 8:offset + 8 + length]
+            if len(data) != length or kind in (b"ANIM", b"ANMF"):
+                raise ValueError("The thumbnail WebP is truncated or animated.")
+            if kind == b"VP8X":
+                if length != 10 or data[0] & 2:
+                    raise ValueError("The thumbnail WebP extended header is invalid or animated.")
+                dimensions.append((int.from_bytes(data[4:7], "little") + 1,
+                                   int.from_bytes(data[7:10], "little") + 1))
+            elif kind == b"VP8 ":
+                if length < 10 or data[0] & 1 or data[3:6] != b"\x9d\x01\x2a":
+                    raise ValueError("The thumbnail WebP frame is invalid.")
+                width, height = struct.unpack("<HH", data[6:10])
+                dimensions.append((width & 0x3fff, height & 0x3fff))
+                frame_count += 1
+            elif kind == b"VP8L":
+                if length < 5 or data[0] != 0x2f:
+                    raise ValueError("The thumbnail WebP lossless header is invalid.")
+                bits = int.from_bytes(data[1:5], "little")
+                dimensions.append(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+                frame_count += 1
+            offset += 8 + length + (length & 1)
+        if frame_count != 1 or offset != len(body):
+            raise ValueError("The thumbnail WebP image header is missing or ambiguous.")
+    else:
+        raise ValueError("The thumbnail image format is unsupported.")
+    for width, height in dimensions:
+        if (not (0 < width <= MAX_THUMBNAIL_DIMENSION and 0 < height <= MAX_THUMBNAIL_DIMENSION)
+                or width * height > MAX_THUMBNAIL_PIXELS):
+            raise ValueError("The thumbnail image dimensions exceeded the limit.")
+    if not dimensions or any(value != dimensions[0] for value in dimensions):
+        raise ValueError("The thumbnail image dimensions are inconsistent.")
+    return dimensions[0]
+
+
+def prune_thumbnail_cache(cache, incoming=0, reserve=0, keep=""):
+    with private_directory(cache) as directory:
+        entries = []
+        for name in os.listdir(directory):
+            if not re.fullmatch(r"[0-9a-f]{64}\.img", name):
+                if name != ".cache.lock":
+                    raise RuntimeError("The thumbnail cache contains an unexpected file.")
+                continue
+            descriptor = private_file(directory, name, os.O_RDONLY)
+            try:
+                info = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            entries.append((info.st_mtime_ns, name, info.st_size))
+        total = sum(entry[2] for entry in entries)
+        count = len(entries)
+        for _, name, size in sorted(entries):
+            if count + reserve <= MAX_CACHE_FILES and total + incoming <= MAX_CACHE_BYTES:
+                break
+            if name != keep:
+                os.unlink(name, dir_fd=directory)
+                total -= size
+                count -= 1
+        if count + reserve > MAX_CACHE_FILES or total + incoming > MAX_CACHE_BYTES:
+            raise ValueError("The thumbnail exceeds the cache limit.")
+
+
+def thumbnail(url):
+    if not valid_thumbnail(url):
+        raise ValueError("The thumbnail URL is not allowed.")
+    base = state_path().parent
+    with private_directory(base):
+        pass
+    cache = base / "thumbnails"
+    path = cache / (hashlib.sha256(url.encode("utf-8")).hexdigest() + ".img")
+    with advisory_lock(cache / ".cache.lock"):
+        try:
+            body = bounded_file_read(path, MAX_THUMBNAIL_BYTES)
+        except FileNotFoundError:
+            try:
+                result = bounded_run([sys.executable, str(Path(__file__).absolute()),
+                                      "_thumbnail-download", url],
+                                     THUMBNAIL_TIMEOUT, MAX_THUMBNAIL_BYTES + 4096)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("The thumbnail download timed out.") from error
+            if result.returncode:
+                try:
+                    detail = json.loads(result.stderr).get("error", "")
+                except (ValueError, AttributeError):
+                    detail = result.stderr.decode("utf-8", "replace")
+                raise RuntimeError(clean_plain_text(detail, 240) or "The thumbnail download failed.")
+            body = result.stdout
+            if len(body) > MAX_THUMBNAIL_BYTES:
+                raise ValueError("The thumbnail exceeded the size limit.")
+            thumbnail_dimensions(body)
+            if len(body) > MAX_CACHE_BYTES or MAX_CACHE_FILES < 1:
+                raise ValueError("The thumbnail exceeds the cache limit.")
+            prune_thumbnail_cache(cache, incoming=len(body), reserve=1)
+            atomic_private_write(path, body)
+        else:
+            thumbnail_dimensions(body)
+            prune_thumbnail_cache(cache, keep=path.name)
+    return {"url": path.absolute().as_uri()}
 
 
 def valid_item(item):
@@ -1073,6 +1412,106 @@ def normalize_hotkeys(payload):
     return rows
 
 
+class OutputLimitError(ValueError):
+    pass
+
+
+_active_process_groups = set()
+_request_interrupted = False
+_spawning_on_main = False
+
+
+def interrupt_request(signum, frame):
+    global _request_interrupted
+    if _request_interrupted:
+        return
+    _request_interrupted = True
+    # Thread-pool workers own detached process groups too. Signal them immediately;
+    # their bounded_run finally blocks perform the wait/reap, without handler locks.
+    for pid in tuple(_active_process_groups):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    # Let Popen finish assigning/registering a child before raising into its
+    # caller, so a signal in the spawn window cannot orphan that child.
+    if not _spawning_on_main:
+        raise RuntimeError("The backend request was interrupted.")
+
+
+def bounded_run(command, timeout, max_bytes, *, text=False, errors=None):
+    """Drain both pipes concurrently, bounding memory and the entire process tree."""
+    global _spawning_on_main
+    if _request_interrupted:
+        raise RuntimeError("The backend request was interrupted.")
+    deadline = time.monotonic() + timeout
+    output, diagnostic = bytearray(), bytearray()
+    failed = True
+    process = None
+    try:
+        on_main = threading.current_thread() is threading.main_thread()
+        if on_main:
+            _spawning_on_main = True
+        try:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, start_new_session=True)
+            _active_process_groups.add(process.pid)
+        finally:
+            if on_main:
+                _spawning_on_main = False
+        if _request_interrupted:
+            raise RuntimeError("The backend request was interrupted.")
+        with selectors.DefaultSelector() as selector:
+            for pipe, buffer in ((process.stdout, output), (process.stderr, diagnostic)):
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, buffer)
+            while selector.get_map() or process.poll() is None:
+                if _request_interrupted:
+                    raise RuntimeError("The backend request was interrupted.")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout, bytes(output), bytes(diagnostic))
+                events = selector.select(min(remaining, 0.05))
+                for key, _ in events:
+                    budget = max_bytes - len(output) - len(diagnostic)
+                    chunk = os.read(key.fd, min(65536, budget + 1))
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if len(chunk) > budget:
+                        raise OutputLimitError("The command output exceeded the size limit.")
+                    key.data.extend(chunk)
+            status = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        failed = False
+    finally:
+        if failed and process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+            # A reaped parent may still have descendants keeping its pipes open.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        if process is not None:
+            _active_process_groups.discard(process.pid)
+            process.stdout.close()
+            process.stderr.close()
+    if text:
+        encoding = "utf-8" if sys.flags.utf8_mode else locale.getencoding()
+        stdout = bytes(output).decode(encoding, errors or "strict").replace("\r\n", "\n").replace("\r", "\n")
+        stderr = bytes(diagnostic).decode(encoding, errors or "strict").replace("\r\n", "\n").replace("\r", "\n")
+    else:
+        stdout, stderr = bytes(output), bytes(diagnostic)
+    return subprocess.CompletedProcess(command, status, stdout, stderr)
+
+
 def youtube_search(limit, date_range):
     executable = shutil.which("yt-dlp")
     if not executable:
@@ -1090,7 +1529,9 @@ def youtube_search(limit, date_range):
         "--playlist-end", str(limit), "--dump-single-json", search_url,
     ]
     try:
-        result = subprocess.run(command, capture_output=True, timeout=35, check=False)
+        result = bounded_run(command, timeout=35, max_bytes=MAX_RESPONSE_BYTES)
+    except OutputLimitError as error:
+        raise ValueError("The YouTube search response exceeded the size limit.") from error
     except subprocess.TimeoutExpired as error:
         raise RuntimeError("The YouTube search timed out.") from error
     except OSError as error:
@@ -1401,18 +1842,20 @@ def mutate(state, command):
             state["filters"].pop(group, None)
     else:
         raise ValueError("Unknown command.")
+    result = bounded_json(public_state(state))
     save_state(state)
-    print(json.dumps(public_state(state), ensure_ascii=True, separators=(",", ":")))
+    print(result)
 
 
 def system_command(command, timeout):
     try:
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
-                                text=True, errors="replace", timeout=timeout)
+        result = bounded_run(command, timeout, MAX_OUTPUT_BYTES, text=True, errors="replace")
     except FileNotFoundError:
         return None, "Required command not found: " + command[0]
     except subprocess.TimeoutExpired:
         return None, "The command timed out: " + command[0]
+    except OutputLimitError:
+        return None, "The command output exceeded the size limit: " + command[0]
     except OSError as error:
         return None, clean_text(str(error), 240)
     return result, ""
@@ -1422,32 +1865,37 @@ def launch_update():
     command = ["omarchy", "launch", "floating", "terminal", "with", "presentation", "omarchy-update"]
     log_path = state_path().with_name("update-launch.log")
     try:
-        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(log_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w+b") as output:
-            os.fchmod(output.fileno(), 0o600)
-            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                       start_new_session=True)
-            try:
-                status = process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                return {"requested": True, "log": str(log_path)}
-            if status != 0:
-                output.seek(0)
-                message = clean_plain_text(output.read(4096).decode("utf-8", errors="replace"), 240)
-                raise RuntimeError(message or "Could not open the update terminal.")
+        with advisory_lock(state_lock_path()), private_directory(log_path.parent) as directory:
+            descriptor = private_file(directory, log_path.name, os.O_RDWR, create=True)
+            with os.fdopen(descriptor, "w+b") as output:
+                output.truncate(0)
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                                           start_new_session=True)
+                try:
+                    status = process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    return {"requested": True, "log": str(log_path)}
+                if status != 0:
+                    output.seek(0)
+                    message = clean_plain_text(output.read(4096).decode("utf-8", errors="replace"), 240)
+                    raise RuntimeError(message or "Could not open the update terminal.")
     except OSError as error:
         raise RuntimeError("Could not open the update terminal: " + str(error)) from error
     return {"requested": True, "log": str(log_path)}
 
 
-def theme_preview(name):
+def theme_preview(name, errors=None):
     slug = name.lower().replace(" ", "-")
     if not slug or slug.startswith(".") or any(char in slug for char in "/\\"):
         return ""
     roots = (Path.home() / ".config" / "omarchy" / "themes",
              Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy") / "themes")
     extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+    def report(error):
+        if errors is not None and len(errors) < 20:
+            errors.append(clean_plain_text(name + ": " + str(error), 240))
+
     for root in roots:
         theme = root / slug
         try:
@@ -1459,19 +1907,39 @@ def theme_preview(name):
                     yield theme / ("preview" + suffix)
                 backgrounds = theme / "backgrounds"
                 if backgrounds.is_dir():
-                    yield from sorted(
-                        (path for path in backgrounds.iterdir() if path.suffix.lower() in extensions),
-                        key=lambda path: path.name)
+                    images = []
+                    for index, path in enumerate(backgrounds.iterdir()):
+                        if index >= 256:
+                            report("The theme background file limit was exceeded.")
+                            break
+                        if path.suffix.lower() in extensions:
+                            images.append(path)
+                    yield from sorted(images, key=lambda path: path.name)
 
             for candidate in candidates():
                 try:
                     image = candidate.resolve(strict=True)
-                    if (image.is_relative_to(resolved_theme) and image.is_file()
-                            and image.stat().st_size <= 16 * 1024 * 1024):
-                        return image.as_uri()
-                except (OSError, RuntimeError):
+                    if not image.is_relative_to(resolved_theme):
+                        report("A theme preview points outside its theme directory.")
+                        continue
+                    info = image.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode):
+                        raise ValueError("The theme preview is not a regular file.")
+                    descriptor = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(descriptor, "rb") as source:
+                        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                            raise ValueError("The theme preview is not a regular file.")
+                        body = source.read(MAX_LOCAL_PREVIEW_BYTES + 1)
+                    if len(body) > MAX_LOCAL_PREVIEW_BYTES:
+                        raise ValueError("The theme preview exceeded the size limit.")
+                    thumbnail_dimensions(body)
+                    return image.as_uri()
+                except FileNotFoundError:
                     continue
-        except (OSError, RuntimeError):
+                except (OSError, RuntimeError, ValueError) as error:
+                    report(error)
+        except (OSError, RuntimeError) as error:
+            report(error)
             continue
     return ""
 
@@ -1508,9 +1976,15 @@ def theme_status():
             list_error = clean_plain_text(result.stderr, 240) or "No installed themes were found."
         elif result.stderr.strip() and not list_error:
             list_error = clean_plain_text(result.stderr, 240)
-    previews = {name: preview for name in themes if (preview := theme_preview(name))}
+    previews = {}
+    preview_errors = []
+    for name in themes:
+        if preview := theme_preview(name, preview_errors):
+            previews[name] = preview
+    warning = clean_plain_text("Some theme previews were rejected: " + "; ".join(preview_errors), 240) \
+        if preview_errors else ""
     return {"current": current_field, "themes": themes, "previews": previews, "listError": list_error,
-            "actionError": "", "warning": ""}
+            "actionError": "", "warning": warning}
 
 
 def set_theme(name):
@@ -1534,7 +2008,8 @@ def set_theme(name):
     elif updated["current"]["value"] != name:
         updated["actionError"] = "The selected theme is not the current theme."
     elif result.stderr.strip():
-        updated["warning"] = clean_plain_text(result.stderr, 240)
+        updated["warning"] = clean_plain_text(
+            "; ".join(value for value in (updated["warning"], result.stderr) if value), 240)
     return updated
 
 
@@ -1576,40 +2051,54 @@ def system_status():
 def main():
     if len(sys.argv) < 2:
         raise ValueError("Choose load, fetch, mark-read, toggle-read, toggle-saved, or set-setting.")
+    if sys.argv[1] in ("thumbnail", "_thumbnail-download"):
+        if len(sys.argv) != 3:
+            raise ValueError("thumbnail requires one allowed HTTPS URL.")
+        if sys.argv[1] == "_thumbnail-download":
+            sys.stdout.buffer.write(download_thumbnail_bytes(sys.argv[2]))
+        else:
+            emit_json(thumbnail(sys.argv[2]))
+        return
     if sys.argv[1] == "display-load":
         if len(sys.argv) != 2:
             raise ValueError("display-load takes no arguments.")
-        print(json.dumps(load_display(), separators=(",", ":")))
+        emit_json(load_display())
         return
     if sys.argv[1] == "system-status":
         if len(sys.argv) != 2:
             raise ValueError("system-status takes no arguments.")
-        print(json.dumps(system_status(), ensure_ascii=True, separators=(",", ":")))
+        emit_json(system_status())
         return
     if sys.argv[1] == "launch-update":
         if len(sys.argv) != 2:
             raise ValueError("launch-update takes no arguments.")
-        print(json.dumps(launch_update(), separators=(",", ":")))
+        emit_json(launch_update())
         return
     if sys.argv[1] == "theme-status":
         if len(sys.argv) != 2:
             raise ValueError("theme-status takes no arguments.")
-        print(json.dumps(theme_status(), ensure_ascii=True, separators=(",", ":")))
+        emit_json(theme_status())
         return
     if sys.argv[1] == "theme-set":
         if len(sys.argv) != 3:
             raise ValueError("theme-set requires an installed theme name.")
-        print(json.dumps(set_theme(sys.argv[2]), ensure_ascii=True, separators=(",", ":")))
+        emit_json(set_theme(sys.argv[2]))
         return
     if sys.argv[1] == "display-save":
         if len(sys.argv) != 5 or not all(re.fullmatch(r"[0-9]{1,5}", x) for x in sys.argv[3:]):
             raise ValueError("display-save requires a mode, width, and height.")
         display = {"mode": sys.argv[2], "width": int(sys.argv[3]), "height": int(sys.argv[4])}
-        print(json.dumps(save_display(display), separators=(",", ":")))
+        with advisory_lock(state_lock_path()):
+            emit_json(save_display(display))
         return
+    with advisory_lock(state_lock_path()):
+        state_main()
+
+
+def state_main():
     state = load_state()
     if sys.argv[1] == "load":
-        print(json.dumps(public_state(state), ensure_ascii=True, separators=(",", ":")))
+        emit_json(public_state(state))
     elif sys.argv[1] == "fetch":
         if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] not in ("on-open", "scheduled")):
             raise ValueError("fetch accepts only on-open or scheduled mode.")
@@ -1627,10 +2116,7 @@ def main():
         else:
             sources = enabled_sources
         payload = perform_fetch(state, sources)
-        result = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-        if len(result.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            raise ValueError("The combined data response exceeded the output limit.")
-        print(result)
+        emit_json(payload)
     elif sys.argv[1] in ("mark-read", "toggle-read", "toggle-saved", "set-setting",
                         "mark-all-read", "mark-all-unread", "mark-read-items",
                         "save-filters", "reset-settings", "clear-saved"):
@@ -1640,6 +2126,8 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupt_request)
+    signal.signal(signal.SIGINT, interrupt_request)
     try:
         main()
     except (ValueError, RuntimeError, OSError, urllib.error.URLError, subprocess.SubprocessError) as error:

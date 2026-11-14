@@ -7,7 +7,7 @@ body:
     attributes:
       label: Plugin version
       description: Find this in the plugin under Settings > Help & About.
-      placeholder: "e.g. 0.2.0"
+      placeholder: "e.g. 0.2.1"
     validations:
       required: true
   - type: textarea

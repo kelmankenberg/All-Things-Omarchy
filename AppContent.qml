@@ -39,6 +39,7 @@ Rectangle {
   property string updateError: ""
   property string updateLog: ""
   property string filterNotice: ""
+  property var thumbnailSources: ({})
   property bool readingActive: true
   readonly property var bulkItems: currentSection === "dashboard" ? allLoadedItems()
     : ((model.items || {})[currentSection] || [])
@@ -58,6 +59,8 @@ Rectangle {
   signal themeSelected(string name)
   signal updateRequested()
   signal openUrlRequested(string url)
+  signal thumbnailRequested(string url)
+  signal thumbnailFailed()
 
   property string currentSection: "dashboard"
   property string currentSettingsSection: "general"
@@ -299,12 +302,13 @@ Rectangle {
       id: themeImage
       objectName: "thumbnailImage"
       anchors.fill: parent
-      source: parent.imageUrl
+      source: parent.imageUrl.indexOf("file:///") === 0 ? parent.imageUrl : ""
       sourceSize.width: 128
       sourceSize.height: 80
       fillMode: Image.PreserveAspectCrop
       asynchronous: true
       visible: status === Image.Ready
+      onStatusChanged: if (status === Image.Error) root.thumbnailFailed()
     }
     Text {
       objectName: "thumbnailFallback"
@@ -1099,11 +1103,12 @@ Rectangle {
       spacing: Style.space(root.compactRows ? 4 : 8)
       RowLayout {
         Layout.fillWidth: true
-        TextField {
+        ClipboardFreeInput {
           id: filterInput
           objectName: "filterInput"
           Layout.fillWidth: true
           placeholderText: root.t("actions.filter")
+          Accessible.description: root.t("actions.filterInputHelp")
           maximumLength: 240
           leftPadding: termsViewport.visible ? termsViewport.width + Style.space(10) : Style.space(8)
           text: String(root.queries[root.currentSection] || "")
@@ -1116,6 +1121,8 @@ Rectangle {
                 && !inputMethodComposing && terms.length > 0) {
               root.removeFilterTerm(root.currentSection, terms.length - 1)
               event.accepted = true
+            } else {
+              filterInput.editKey(event)
             }
           }
 
@@ -1344,6 +1351,10 @@ Rectangle {
 
             Rectangle {
               objectName: "itemPreview"
+              property string remoteUrl: root.showPreviews ? String(modelData.thumbnail || "") : ""
+              onRemoteUrlChanged: if (visible && remoteUrl) root.thumbnailRequested(remoteUrl)
+              onVisibleChanged: if (visible && remoteUrl) root.thumbnailRequested(remoteUrl)
+              Component.onCompleted: if (visible && remoteUrl) root.thumbnailRequested(remoteUrl)
               visible: root.showPreviews && ["plugins", "themes", "videos", "news", "events"].indexOf(modelData.kind) >= 0
               Layout.preferredWidth: Style.space(root.compactRows ? 80 : 120)
               Layout.preferredHeight: Style.space(root.compactRows ? 50 : 76)
@@ -1354,13 +1365,19 @@ Rectangle {
 
               Image {
                 id: preview
+                objectName: "feedPreviewImage"
                 anchors.fill: parent
-                source: root.showPreviews ? modelData.thumbnail || "" : ""
+                source: root.showPreviews ? root.thumbnailSources[parent.remoteUrl] || "" : ""
+                onSourceChanged: {
+                  if (!source && parent.visible && parent.remoteUrl)
+                    root.thumbnailRequested(parent.remoteUrl)
+                }
                 sourceSize.width: 240
                 sourceSize.height: 152
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
                 visible: status === Image.Ready
+                onStatusChanged: if (status === Image.Error) root.thumbnailFailed()
               }
               Text {
                 anchors.centerIn: parent

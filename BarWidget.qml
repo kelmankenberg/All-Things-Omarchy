@@ -50,6 +50,10 @@ BarWidget {
   property bool updatePending: false
   property string updateError: ""
   property string updateLog: ""
+  property var thumbnailSources: ({})
+  property var thumbnailAttempts: ({})
+  property var thumbnailQueue: []
+  property string thumbnailRequest: ""
   readonly property var enabledFeedSections: ["plugins", "themes", "videos", "news",
     "releases", "manual", "hotkeys", "community", "events"].filter(function(section) {
     return root.appData.settings["section_" + section] !== false
@@ -81,6 +85,27 @@ BarWidget {
     helper.running = true
     busy = true
     return true
+  }
+
+  function requestThumbnail(url) {
+    if (!url || thumbnailAttempts[url]) return
+    if (Object.keys(thumbnailAttempts).length >= 512 || thumbnailQueue.length >= 64) {
+      status = "The preview request limit was reached. Restart the plugin to retry."
+      return
+    }
+    var attempts = Object.assign({}, thumbnailAttempts)
+    attempts[url] = true
+    thumbnailAttempts = attempts
+    thumbnailQueue = thumbnailQueue.concat([url])
+    loadNextThumbnail()
+  }
+
+  function loadNextThumbnail() {
+    if (thumbnailHelper.running || thumbnailQueue.length === 0) return
+    thumbnailRequest = thumbnailQueue[0]
+    thumbnailQueue = thumbnailQueue.slice(1)
+    thumbnailHelper.command = ["python3", helperPath, "thumbnail", thumbnailRequest]
+    thumbnailHelper.running = true
   }
 
   function refresh(mode) {
@@ -435,27 +460,47 @@ BarWidget {
     Qt.callLater(function() { root.flushPendingWork() })
   }
 
-  Process {
+  BoundedProcess {
+    id: thumbnailHelper
+    timeoutMs: 25000
+    onCompleted: function(exitCode, output, errorOutput) {
+      try {
+        if (exitCode !== 0) throw new Error(root.errorMessage(errorOutput, "Could not load the preview."))
+        var payload = JSON.parse(output)
+        if (typeof payload.url !== "string" || payload.url.indexOf("file:///") !== 0)
+          throw new Error("The preview response is invalid.")
+        var sources = Object.assign({}, root.thumbnailSources)
+        var keys = Object.keys(sources)
+        if (keys.length >= 64) delete sources[keys[0]]
+        sources[root.thumbnailRequest] = payload.url
+        root.thumbnailSources = sources
+        var attempts = Object.assign({}, root.thumbnailAttempts)
+        delete attempts[root.thumbnailRequest]
+        root.thumbnailAttempts = attempts
+      } catch (error) {
+        root.status = "Could not load the preview: " + String(error.message || error).slice(0, 240)
+      }
+      Qt.callLater(function() { root.loadNextThumbnail() })
+    }
+  }
+
+  BoundedProcess {
     id: helper
-    stdout: StdioCollector { id: helperOut; waitForEnd: true }
-    stderr: StdioCollector { id: helperErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      var output = String(helperOut.text || "")
-      var errorOutput = String(helperErr.text || "")
+    timeoutMs: 150000
+    onCompleted: function(exitCode, output, errorOutput) {
       if (["fetch", "load"].indexOf(root.helperAction) >= 0) root.applyPayload(exitCode, output, errorOutput)
       else root.applyDataMutation(exitCode, output, errorOutput)
     }
   }
 
-  Process {
+  BoundedProcess {
     id: updateHelper
-    stdout: StdioCollector { id: updateOut; waitForEnd: true }
-    stderr: StdioCollector { id: updateErr; waitForEnd: true }
-    onExited: function(exitCode) {
+    timeoutMs: 15000
+    onCompleted: function(exitCode, output, errorOutput) {
       root.updateLaunching = false
       try {
-        if (exitCode !== 0) throw new Error(root.errorMessage(updateErr.text, "Could not launch the update terminal."))
-        var result = JSON.parse(String(updateOut.text || ""))
+        if (exitCode !== 0) throw new Error(root.errorMessage(errorOutput, "Could not launch the update terminal."))
+        var result = JSON.parse(output)
         if (result.requested !== true || typeof result.log !== "string" || !result.log)
           throw new Error("The update launch response is invalid.")
         root.updateLog = result.log
@@ -466,15 +511,14 @@ BarWidget {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: themeHelper
-    stdout: StdioCollector { id: themeOut; waitForEnd: true }
-    stderr: StdioCollector { id: themeErr; waitForEnd: true }
-    onExited: function(exitCode) {
+    timeoutMs: 240000
+    onCompleted: function(exitCode, output, errorOutput) {
       root.themeBusy = false
       try {
-        if (exitCode !== 0) throw new Error(root.errorMessage(themeErr.text, "Could not update the theme."))
-        var result = JSON.parse(String(themeOut.text || ""))
+        if (exitCode !== 0) throw new Error(root.errorMessage(errorOutput, "Could not update the theme."))
+        var result = JSON.parse(output)
         if (!result.current || !Array.isArray(result.themes))
           throw new Error("The theme response is invalid.")
         root.themeData = result
@@ -484,15 +528,14 @@ BarWidget {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: systemHelper
-    stdout: StdioCollector { id: systemOut; waitForEnd: true }
-    stderr: StdioCollector { id: systemErr; waitForEnd: true }
-    onExited: function(exitCode) {
+    timeoutMs: 120000
+    onCompleted: function(exitCode, output, errorOutput) {
       root.systemBusy = false
       try {
-        if (exitCode !== 0) throw new Error(root.errorMessage(systemErr.text, "Could not check system status."))
-        var result = JSON.parse(String(systemOut.text || ""))
+        if (exitCode !== 0) throw new Error(root.errorMessage(errorOutput, "Could not check system status."))
+        var result = JSON.parse(output)
         if (!result.version || !result.theme || !result.update)
           throw new Error("The system status response is invalid.")
         root.systemData = result
@@ -502,15 +545,14 @@ BarWidget {
     }
   }
 
-  Process {
+  BoundedProcess {
     id: displayHelper
-    stdout: StdioCollector { id: displayOut; waitForEnd: true }
-    stderr: StdioCollector { id: displayErr; waitForEnd: true }
-    onExited: function(exitCode) {
+    timeoutMs: 15000
+    onCompleted: function(exitCode, output, errorOutput) {
       if (root.displayAction === "load") {
         try {
-          if (exitCode !== 0) throw new Error(root.errorMessage(displayErr.text, "Could not load the display preference."))
-          var preference = JSON.parse(String(displayOut.text || ""))
+          if (exitCode !== 0) throw new Error(root.errorMessage(errorOutput, "Could not load the display preference."))
+          var preference = JSON.parse(output)
           if (["docked", "window", "maximized"].indexOf(preference.mode) < 0
               || !Number.isInteger(preference.width) || !Number.isInteger(preference.height)
               || preference.width < 0 || preference.height < 0
@@ -530,7 +572,7 @@ BarWidget {
           else root.setMode(request)
         }
       } else if (exitCode !== 0) {
-        root.displayError = root.errorMessage(displayErr.text, "Could not save the display preference.")
+        root.displayError = root.errorMessage(errorOutput, "Could not save the display preference.")
       } else {
         root.displayError = ""
       }
@@ -643,6 +685,9 @@ BarWidget {
       anchors.fill: parent
       translations: strings
       model: root.appData
+      thumbnailSources: root.thumbnailSources
+      onThumbnailRequested: function(url) { root.requestThumbnail(url) }
+      onThumbnailFailed: root.status = "The preview image could not be decoded."
       status: root.displayError || root.status
       busy: root.busy
       queries: root.queries
@@ -694,6 +739,9 @@ BarWidget {
       anchors.fill: parent
       translations: strings
       model: root.appData
+      thumbnailSources: root.thumbnailSources
+      onThumbnailRequested: function(url) { root.requestThumbnail(url) }
+      onThumbnailFailed: root.status = "The preview image could not be decoded."
       status: root.displayError || root.status
       busy: root.busy
       queries: root.queries

@@ -22,6 +22,7 @@ TestCase {
   property string lastReset: ""
   property string openedUrl: ""
   property int clearSavedRequests: 0
+  property string requestedThumbnail: ""
 
   Plugin.AppContent {
     id: app
@@ -62,6 +63,7 @@ TestCase {
     onUpdateRequested: testCase.updateRequests++
     onRefreshRequested: testCase.refreshRequests++
     onOpenUrlRequested: function(url) { testCase.openedUrl = url }
+    onThumbnailRequested: function(url) { testCase.requestedThumbnail = url }
     onSettingsResetRequested: function(group) { testCase.lastReset = group }
     onClearSavedRequested: testCase.clearSavedRequests++
     onSettingChanged: function(key, value) {
@@ -110,6 +112,8 @@ TestCase {
     testCase.lastReset = ""
     testCase.openedUrl = ""
     testCase.clearSavedRequests = 0
+    requestedThumbnail = ""
+    app.thumbnailSources = ({})
     app.setSection("plugins")
   }
 
@@ -126,6 +130,40 @@ TestCase {
     for (var index = 0; index < value.length; ++index)
       keyClick(value.charAt(index).toUpperCase().charCodeAt(0))
     return input
+  }
+
+  function test_filter_keyboard_edits_work_without_native_paste() {
+    var input = enterText("dark")
+    compare(input.text, "dark")
+    verify(input.readOnly)
+    keyClick(Qt.Key_V, Qt.ControlModifier)
+    keyClick(Qt.Key_Insert, Qt.ShiftModifier)
+    compare(input.text, "dark")
+    keyClick(Qt.Key_Backspace)
+    compare(input.text, "dar")
+    input.select(0, input.text.length)
+    keyClick(Qt.Key_X)
+    compare(input.text, "x")
+    compare(app.queries.plugins, "x")
+  }
+
+  function test_remote_previews_wait_for_bounded_local_download() {
+    var url = "https://omarchy.org/test-preview.png"
+    var row = Object.assign(item("Preview", "", "plugins"), { thumbnail: url })
+    app.model = { items: { plugins: [row] } }
+    tryCompare(testCase, "requestedThumbnail", url)
+    var preview = findChild(app, "itemPreview")
+    var image = findChild(preview, "feedPreviewImage")
+    compare(String(image.source), "")
+    var local = String(Qt.resolvedUrl("preview.svg"))
+    app.thumbnailSources = ({})
+    var sources = ({})
+    sources[url] = local
+    app.thumbnailSources = sources
+    tryCompare(image, "status", Image.Ready)
+    compare(String(image.source), local)
+    app.model = Object.assign({}, app.model, { settings: { showPreviews: false } })
+    compare(String(image.source), "")
   }
 
   function test_bulk_read_controls_use_section_even_with_active_filters() {

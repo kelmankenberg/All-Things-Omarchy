@@ -1,9 +1,14 @@
 import importlib.util
+import io
 import json
 import os
+import shutil
+import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +19,23 @@ BACKEND_PATH = Path(__file__).resolve().parents[1] / "Backend.py"
 SPEC = importlib.util.spec_from_file_location("all_things_backend", BACKEND_PATH)
 backend = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(backend)
+
+TEST_DIRECTORY = BACKEND_PATH.parent / ("tests/.backend-work-" + str(os.getpid()))
+ORIGINAL_TEMPDIR = tempfile.tempdir
+TEST_ENVIRONMENT = patch.dict(os.environ, {"XDG_STATE_HOME": str(TEST_DIRECTORY / "xdg-state"),
+                                          "PYTHONDONTWRITEBYTECODE": "1"})
+
+
+def setUpModule():
+    TEST_DIRECTORY.mkdir(mode=0o700)
+    tempfile.tempdir = str(TEST_DIRECTORY)
+    TEST_ENVIRONMENT.start()
+
+
+def tearDownModule():
+    tempfile.tempdir = ORIGINAL_TEMPDIR
+    TEST_ENVIRONMENT.stop()
+    shutil.rmtree(TEST_DIRECTORY)
 
 
 class TextTests(unittest.TestCase):
@@ -91,19 +113,19 @@ sys.exit(int(os.environ.get("UPDATE_TEST_EXIT", "0")))
             user_theme.mkdir(parents=True)
             stock_theme.mkdir(parents=True)
             stock_preview = stock_theme / "preview.png"
-            stock_preview.write_bytes(b"stock")
+            stock_preview.write_bytes(ThumbnailBoundaryTests.png())
             local_preview = user_theme / "preview.png"
-            local_preview.write_bytes(b"local")
+            local_preview.write_bytes(ThumbnailBoundaryTests.png())
             with patch.object(backend.Path, "home", return_value=home), \
                     patch.dict(os.environ, {"OMARCHY_PATH": str(base / "omarchy")}):
                 self.assertEqual(local_preview.as_uri(), backend.theme_preview("Tokyo Night"))
                 local_preview.unlink()
                 outside = base / "outside.png"
-                outside.write_bytes(b"outside")
+                outside.write_bytes(ThumbnailBoundaryTests.png())
                 local_preview.symlink_to(outside)
                 background = user_theme / "backgrounds" / "background.jpg"
                 background.parent.mkdir()
-                background.write_bytes(b"background")
+                background.write_bytes(ThumbnailBoundaryTests.png())
                 self.assertEqual(background.as_uri(), backend.theme_preview("Tokyo Night"))
                 background.unlink()
                 self.assertEqual(stock_preview.as_uri(), backend.theme_preview("Tokyo Night"))
@@ -115,7 +137,7 @@ sys.exit(int(os.environ.get("UPDATE_TEST_EXIT", "0")))
         current = SimpleNamespace(returncode=0, stdout="Current Theme\n", stderr="")
         listing = SimpleNamespace(returncode=0, stdout="Current Theme\nTokyo Night\n", stderr="")
         with patch.object(backend, "system_command", side_effect=[(current, ""), (listing, "")]), \
-                patch.object(backend, "theme_preview", side_effect=lambda name: "file:///preview.png"
+                patch.object(backend, "theme_preview", side_effect=lambda name, errors=None: "file:///preview.png"
                              if name == "Tokyo Night" else ""):
             response = backend.theme_status()
         self.assertEqual("Current Theme", response["current"]["value"])
@@ -304,7 +326,7 @@ else:
         self.assertEqual({"status": "unknown", "detail": "Database unavailable"}, response["update"])
 
     def test_system_status_does_not_hide_missing_or_timed_out_commands(self):
-        with patch.object(backend.subprocess, "run",
+        with patch.object(backend, "bounded_run",
                           side_effect=subprocess.TimeoutExpired("checkupdates", 60)):
             result, error = backend.system_command(["checkupdates"], 60)
         self.assertIsNone(result)
@@ -524,7 +546,7 @@ else:
         result = type("Result", (), {"stdout": json.dumps(payload).encode(),
                                     "stderr": b"", "returncode": 0})()
         with patch.object(backend.shutil, "which", return_value="/usr/bin/yt-dlp"), \
-                patch.object(backend.subprocess, "run", return_value=result) as run:
+                patch.object(backend, "bounded_run", return_value=result) as run:
             rows = backend.youtube_search(50, "all")
         command = run.call_args.args[0]
         self.assertIn("youtubetab:approximate_date=1", command)
@@ -979,6 +1001,578 @@ else:
         self.assertEqual("omarchy-site", state["sources"]["themes"]["provider"])
         self.assertEqual("https://omarchy.org/assets/themes/theme.webp",
                          result["items"]["saved"][0]["thumbnail"])
+
+
+class ProcessBoundaryTests(unittest.TestCase):
+    def test_helper_term_cleans_main_thread_threadpool_and_spawn_window_children(self):
+        original_child = """
+import os, pathlib, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+while True: time.sleep(1)
+"""
+        for mode in ("main", "threadpool", "spawn-window"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                child_script = base / "child.py"
+                child_script.write_text(original_child)
+                helper_script = base / "helper.py"
+                helper_script.write_text("""
+import importlib.util, json, pathlib, signal, subprocess, sys, time
+spec = importlib.util.spec_from_file_location("backend", sys.argv[1])
+b = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(b)
+signal.signal(signal.SIGTERM, b.interrupt_request)
+base = pathlib.Path(sys.argv[2])
+mode = sys.argv[3]
+command = [sys.executable, str(base / "child.py")]
+if mode == "spawn-window":
+    original = subprocess.Popen
+    def delayed_popen(*args, **kwargs):
+        process = original(*args, **kwargs)
+        time.sleep(0.4)
+        return process
+    b.subprocess.Popen = delayed_popen
+try:
+    if mode == "threadpool":
+        def fetch(key, settings):
+            b.bounded_run(command + [str(base / (key + ".pid"))], 10, 1024)
+            return [], ""
+        b.fetch_source = fetch
+        b.perform_fetch(b.empty_state(), ["plugins", "themes"])
+    else:
+        b.bounded_run(command + [str(base / "main.pid")], 10, 1024)
+except RuntimeError as error:
+    print(json.dumps({"error": str(error)}), file=sys.stderr)
+    sys.exit(1)
+""")
+                process = subprocess.Popen([sys.executable, str(helper_script), str(BACKEND_PATH),
+                                            str(base), mode], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    expected = 2 if mode == "threadpool" else 1
+                    deadline = time.monotonic() + 3
+                    while len(list(base.glob("*.pid"))) < expected and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    pids = [int(path.read_text()) for path in base.glob("*.pid")]
+                    self.assertEqual(expected, len(pids))
+                    process.send_signal(signal.SIGTERM)
+                    output, diagnostic = process.communicate(timeout=3)
+                    self.assertEqual(1, process.returncode, diagnostic)
+                    self.assertEqual(b"", output)
+                    self.assertIn("interrupted", json.loads(diagnostic)["error"])
+                    for pid in pids:
+                        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                                                capture_output=True, text=True, check=False).stdout.strip()
+                        self.assertTrue(not status or status.startswith("Z"), status)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+
+    def test_completed_process_keeps_binary_text_newlines_and_exit_status(self):
+        command = [sys.executable, "-c",
+                   "import os; os.write(1,b'one\\r\\ntwo\\r\\xff'); os.write(2,b'error'); exit(7)"]
+        result = backend.bounded_run(command, 3, 1024)
+        self.assertIsInstance(result, subprocess.CompletedProcess)
+        self.assertEqual(command, result.args)
+        self.assertEqual(7, result.returncode)
+        self.assertEqual(b"one\r\ntwo\r\xff", result.stdout)
+        self.assertEqual(b"error", result.stderr)
+        result, error = backend.system_command(command, 3)
+        self.assertEqual("", error)
+        self.assertEqual("one\ntwo\n\ufffd", result.stdout)
+        self.assertEqual("error", result.stderr)
+        self.assertEqual(7, result.returncode)
+
+    def test_stdout_and_stderr_share_streaming_limit_and_reap_process(self):
+        original_popen = subprocess.Popen
+        for stream in (1, 2):
+            started_processes = []
+
+            def start_process(*args, **kwargs):
+                process = original_popen(*args, **kwargs)
+                started_processes.append(process)
+                return process
+
+            command = [sys.executable, "-c",
+                       f"import os; os.write({3 - stream}, b'small'); "
+                       f"exec('while True: os.write({stream}, b\"x\" * 4096)')"]
+            with self.subTest(stream=stream), \
+                    patch.object(backend.subprocess, "Popen", side_effect=start_process), \
+                    patch.object(backend, "MAX_OUTPUT_BYTES", 1024):
+                started = time.monotonic()
+                result, error = backend.system_command(command, 3)
+                self.assertIsNone(result)
+                self.assertIn("size limit", error)
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertEqual(1, len(started_processes))
+                self.assertIsNotNone(started_processes[0].returncode)
+                with self.assertRaises(ChildProcessError):
+                    os.waitpid(started_processes[0].pid, os.WNOHANG)
+
+    def test_whole_deadline_kills_descendants_even_after_parent_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "child.pid"
+            command = [sys.executable, "-c", """
+import os, pathlib, signal, sys, time
+child = os.fork()
+if child == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+    while True:
+        os.write(1, b"slow")
+        time.sleep(0.05)
+os._exit(0)
+""", str(pid_path)]
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                backend.bounded_run(command, 0.35, 1024)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertIsInstance(raised.exception.stdout, bytes)
+            child = int(pid_path.read_text())
+            status = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
+                                    capture_output=True, text=True, check=False).stdout.strip()
+            self.assertTrue(not status or status.startswith("Z"), status)
+
+    def test_youtube_stderr_limit_and_invalid_data_surface_existing_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command = Path(directory) / "yt-dlp"
+            command.write_text("#!/usr/bin/python3\nimport os\nwhile True: os.write(2, b'x' * 4096)\n")
+            command.chmod(0o700)
+            with patch.object(backend.shutil, "which", return_value=str(command)), \
+                    patch.object(backend, "MAX_RESPONSE_BYTES", 1024):
+                with self.assertRaisesRegex(ValueError, "search response exceeded"):
+                    backend.youtube_search(50, "all")
+        result = subprocess.CompletedProcess([], 1, b"", b"real failure")
+        with patch.object(backend.shutil, "which", return_value="yt-dlp"), \
+                patch.object(backend, "bounded_run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "real failure"):
+                backend.youtube_search(50, "all")
+
+
+class StateBoundaryTests(unittest.TestCase):
+    def test_writable_ancestors_are_rejected_without_chmod_or_state_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / "shared"
+            shared.mkdir()
+            base = shared / "all-things-omarchy"
+            base.mkdir(mode=0o755)
+            path = base / "state.json"
+            original = json.dumps(backend.empty_state()).encode()
+            path.write_bytes(original)
+            modes = (0o770, 0o777) + ((0o1777,) if os.getuid() != 0 else ())
+            for mode in modes:
+                shared.chmod(mode)
+                with self.subTest(mode=oct(mode)), \
+                        patch.object(backend, "state_path", return_value=path):
+                    with self.assertRaisesRegex(RuntimeError, "writable ancestor"):
+                        backend.load_state()
+                    with self.assertRaisesRegex(RuntimeError, "writable ancestor"):
+                        backend.save_state(backend.empty_state())
+                    with self.assertRaisesRegex(RuntimeError, "writable ancestor"):
+                        with backend.advisory_lock(backend.state_lock_path()):
+                            pass
+                    self.assertEqual(mode, shared.stat().st_mode & 0o7777)
+                    self.assertEqual(0o755, base.stat().st_mode & 0o777)
+                    self.assertEqual(original, path.read_bytes())
+                    self.assertFalse(backend.state_lock_path().exists())
+
+    def test_root_owned_sticky_ancestor_is_allowed_and_never_chmodded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shared = Path(directory) / "sticky-root"
+            shared.mkdir()
+            shared.chmod(0o1777)
+            shared_info = shared.stat()
+            original_fstat = backend.os.fstat
+
+            def root_owned_sticky(descriptor):
+                info = original_fstat(descriptor)
+                if (info.st_dev, info.st_ino) == (shared_info.st_dev, shared_info.st_ino):
+                    return SimpleNamespace(st_uid=0, st_mode=info.st_mode)
+                return info
+
+            path = shared / "all-things-omarchy" / "state.json"
+            with patch.object(backend, "state_path", return_value=path), \
+                    patch.object(backend.os, "fstat", side_effect=root_owned_sticky):
+                state = backend.empty_state()
+                state["readIds"] = ["news:keep"]
+                backend.save_state(state)
+                self.assertEqual(["news:keep"], backend.load_state()["readIds"])
+                with backend.advisory_lock(backend.state_lock_path()):
+                    pass
+            self.assertEqual(0o1777, shared.stat().st_mode & 0o7777)
+            self.assertEqual(0o700, path.parent.stat().st_mode & 0o777)
+
+    def test_foreign_owned_ancestor_is_rejected_before_creating_state_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            foreign = Path(directory) / "foreign-owner"
+            foreign.mkdir(mode=0o755)
+            foreign_info = foreign.stat()
+            original_fstat = backend.os.fstat
+
+            def foreign_owned(descriptor):
+                info = original_fstat(descriptor)
+                if (info.st_dev, info.st_ino) == (foreign_info.st_dev, foreign_info.st_ino):
+                    return SimpleNamespace(st_uid=os.getuid() + 100000, st_mode=info.st_mode)
+                return info
+
+            path = foreign / "all-things-omarchy" / "state.json"
+            with patch.object(backend, "state_path", return_value=path), \
+                    patch.object(backend.os, "fstat", side_effect=foreign_owned):
+                with self.assertRaisesRegex(RuntimeError, "wrong owner"):
+                    backend.save_state(backend.empty_state())
+            self.assertFalse(path.parent.exists())
+            self.assertEqual(0o755, foreign.stat().st_mode & 0o777)
+
+    def test_load_and_mutation_reject_expanded_output_before_stdout_or_state_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            with patch.object(backend, "state_path", return_value=path):
+                backend.save_state(backend.empty_state())
+                original = path.read_bytes()
+                for argv in (["Backend.py", "load"],
+                             ["Backend.py", "mark-read", "news:keep"]):
+                    output = io.StringIO()
+                    with self.subTest(command=argv[1]), \
+                            patch.object(sys, "argv", argv), \
+                            patch.object(sys, "stdout", output), \
+                            patch.object(backend, "MAX_OUTPUT_BYTES", len(original)):
+                        with self.assertRaisesRegex(ValueError, "output limit"):
+                            backend.main()
+                    self.assertEqual("", output.getvalue())
+                    self.assertEqual(original, path.read_bytes())
+
+    def test_owner_directory_and_files_are_made_private_without_resetting_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "all-things-omarchy"
+            base.mkdir(mode=0o755)
+            path = base / "state.json"
+            state = backend.empty_state()
+            state["readIds"] = ["news:keep"]
+            original = json.dumps(state).encode()
+            path.write_bytes(original)
+            path.chmod(0o644)
+            with patch.object(backend, "state_path", return_value=path):
+                self.assertEqual(["news:keep"], backend.load_state()["readIds"])
+                self.assertEqual(original, path.read_bytes())
+                self.assertEqual(0o700, base.stat().st_mode & 0o777)
+                self.assertEqual(0o600, path.stat().st_mode & 0o777)
+                with backend.advisory_lock(backend.state_lock_path()):
+                    self.assertEqual(0o600, backend.state_lock_path().stat().st_mode & 0o777)
+
+    def test_reads_bound_actual_bytes_instead_of_relying_on_stat_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_bytes(b"x" * 4096)
+            original_fstat = backend.os.fstat
+
+            def understated_size(descriptor):
+                info = original_fstat(descriptor)
+                return SimpleNamespace(st_uid=info.st_uid, st_mode=info.st_mode,
+                                       st_nlink=info.st_nlink, st_size=1)
+
+            with patch.object(backend, "state_path", return_value=path), \
+                    patch.object(backend, "MAX_STATE_BYTES", 32), \
+                    patch.object(backend.os, "fstat", side_effect=understated_size):
+                with self.assertRaisesRegex(RuntimeError, "too large"):
+                    backend.load_state()
+            self.assertEqual(4096, path.stat().st_size)
+
+    def test_state_display_lock_and_log_reject_symlinks_fifos_and_hardlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            path = base / "state.json"
+            outside = base / "outside"
+            outside.write_bytes(b"must not change")
+            for name in ("state.json", "display.json", ".state.lock", "update-launch.log"):
+                target = base / name
+                for kind in ("symlink", "fifo", "hardlink"):
+                    with self.subTest(name=name, kind=kind), \
+                            patch.object(backend, "state_path", return_value=path):
+                        if kind == "symlink":
+                            target.symlink_to(outside)
+                        elif kind == "fifo":
+                            os.mkfifo(target)
+                        else:
+                            os.link(outside, target)
+                        try:
+                            with self.assertRaises((RuntimeError, OSError)):
+                                if name == "state.json":
+                                    backend.load_state()
+                                elif name == "display.json":
+                                    backend.load_display()
+                                elif name == ".state.lock":
+                                    with backend.advisory_lock(target):
+                                        pass
+                                else:
+                                    backend.launch_update()
+                            if name in ("state.json", "display.json"):
+                                with self.assertRaises((RuntimeError, OSError)):
+                                    backend.write_state_file(target, backend.empty_state())
+                            self.assertEqual(b"must not change", outside.read_bytes())
+                        finally:
+                            target.unlink()
+
+    def test_symlink_directory_and_wrong_owner_are_rejected_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            real = base / "real"
+            real.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with patch.object(backend, "state_path", return_value=alias / "state.json"):
+                with self.assertRaises((RuntimeError, OSError)):
+                    backend.save_state(backend.empty_state())
+            self.assertEqual([], list(real.iterdir()))
+            with patch.object(backend, "state_path", return_value=real / "state.json"), \
+                    patch.object(backend.os, "getuid", return_value=os.getuid() + 1):
+                with self.assertRaisesRegex(RuntimeError, "wrong owner"):
+                    backend.load_state()
+
+    def test_lock_deadline_and_exception_release_for_state_and_display(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock = Path(directory) / ".state.lock"
+            with backend.advisory_lock(lock):
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "Timed out"):
+                    with backend.advisory_lock(lock, timeout=0.1):
+                        self.fail("lock unexpectedly acquired")
+                self.assertLess(time.monotonic() - started, 0.5)
+            with patch.object(backend, "state_path", return_value=lock.with_name("state.json")):
+                for argv in (["Backend.py", "unknown"],
+                             ["Backend.py", "display-save", "invalid", "800", "600"]):
+                    with patch.object(sys, "argv", argv):
+                        with self.assertRaises(ValueError):
+                            backend.main()
+                    with backend.advisory_lock(lock, timeout=0.1):
+                        pass
+
+    def test_parallel_cli_read_modify_writes_keep_all_changes_and_valid_display(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, XDG_STATE_HOME=directory, PYTHONDONTWRITEBYTECODE="1")
+            base = Path(directory) / "all-things-omarchy"
+            with patch.dict(os.environ, env):
+                state = backend.empty_state()
+                state["savedItems"] = [{"id": "news:keep", "kind": "news", "name": "Saved",
+                                        "url": "https://omarchy.org/news/keep/"}]
+                backend.save_state(state)
+            commands = [["mark-read", "news:item-" + str(index)] for index in range(12)]
+            commands += [["display-save", "window", str(800 + index), "600"] for index in range(4)]
+            processes = [subprocess.Popen([sys.executable, str(BACKEND_PATH), *args],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                         for args in commands]
+            try:
+                for process in processes:
+                    _, diagnostic = process.communicate(timeout=15)
+                    self.assertEqual(0, process.returncode, diagnostic)
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+            with patch.dict(os.environ, env):
+                restored = backend.load_state()
+                self.assertEqual({"news:item-" + str(index) for index in range(12)},
+                                 set(restored["readIds"]))
+                self.assertEqual(["news:keep"], [item["id"] for item in restored["savedItems"]])
+                self.assertEqual(600, backend.load_display()["height"])
+                self.assertIn(backend.load_display()["width"], range(800, 804))
+                self.assertEqual(0o600, (base / "display.json").stat().st_mode & 0o777)
+
+    def test_display_save_subprocess_waits_for_shared_state_transaction_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, XDG_STATE_HOME=directory)
+            base = Path(directory) / "all-things-omarchy"
+            process = None
+            try:
+                with backend.advisory_lock(base / ".state.lock"):
+                    process = subprocess.Popen([sys.executable, str(BACKEND_PATH), "display-save",
+                                                "window", "900", "650"], env=env,
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    time.sleep(0.15)
+                    self.assertIsNone(process.poll())
+                    self.assertFalse((base / "display.json").exists())
+                output, diagnostic = process.communicate(timeout=5)
+                self.assertEqual(0, process.returncode, diagnostic)
+                self.assertEqual(900, json.loads(output)["width"])
+            finally:
+                if process is not None:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+
+
+class ThumbnailBoundaryTests(unittest.TestCase):
+    URL = "https://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg"
+
+    @staticmethod
+    def png(width=32, height=24):
+        import zlib
+
+        def chunk(kind, data):
+            return (struct.pack(">I", len(data)) + kind + data
+                    + struct.pack(">I", zlib.crc32(kind + data)))
+
+        return (b"\x89PNG\r\n\x1a\n"
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress((b"\0" + b"\0" * width * 3) * height))
+                + chunk(b"IEND", b""))
+
+    def test_png_jpeg_webp_dimensions_and_bombs_or_unsupported_data(self):
+        self.assertEqual((32, 24), backend.thumbnail_dimensions(self.png()))
+        jpeg = b"\xff\xd8\xff\xc0\0\x0b\x08\0\x18\0\x20\x01\x01\x11\0\xff\xda"
+        self.assertEqual((32, 24), backend.thumbnail_dimensions(jpeg))
+        vp8l = b"\x2f" + struct.pack("<I", 31 | (23 << 14))
+        payload = b"VP8L" + struct.pack("<I", len(vp8l)) + vp8l + b"\0"
+        webp = b"RIFF" + struct.pack("<I", len(payload) + 4) + b"WEBP" + payload
+        self.assertEqual((32, 24), backend.thumbnail_dimensions(webp))
+        for body in (self.png(4097, 1), self.png(4096, 4096), b"<svg/>",
+                     b"GIF89a" + b"\xff" * 20, b"\xff\xd8", webp[:-1],
+                     self.png()[:-12], jpeg.replace(b"\0\x18\0\x20", b"\xff\xff\xff\xff")):
+            with self.subTest(prefix=body[:20]), self.assertRaises(ValueError):
+                backend.thumbnail_dimensions(body)
+
+    def test_local_theme_previews_share_dimension_and_byte_limits_and_surface_warnings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            theme = home / ".config/omarchy/themes/safe-theme"
+            theme.mkdir(parents=True)
+            preview = theme / "preview.png"
+            current = subprocess.CompletedProcess([], 0, "Safe Theme\n", "")
+            with patch.object(backend.Path, "home", return_value=home), \
+                    patch.dict(os.environ, {"OMARCHY_PATH": str(base / "stock")}), \
+                    patch.object(backend, "system_command", return_value=(current, "")):
+                preview.write_bytes(self.png())
+                self.assertEqual(preview.as_uri(), backend.theme_status()["previews"]["Safe Theme"])
+                self.assertEqual("", backend.theme_status()["warning"])
+                preview.write_bytes(self.png(4097, 1))
+                response = backend.theme_status()
+                self.assertEqual({}, response["previews"])
+                self.assertIn("dimensions", response["warning"])
+                preview.write_bytes(b"x" * 65)
+                with patch.object(backend, "MAX_LOCAL_PREVIEW_BYTES", 64):
+                    response = backend.theme_status()
+                self.assertIn("size limit", response["warning"])
+                preview.unlink()
+                (theme / "preview.gif").write_bytes(b"GIF89a" + b"\xff" * 20)
+                response = backend.theme_status()
+                self.assertEqual({}, response["previews"])
+                self.assertIn("unsupported", response["warning"])
+                backgrounds = theme / "backgrounds"
+                backgrounds.mkdir()
+                background = backgrounds / "safe.png"
+                background.write_bytes(self.png())
+                response = backend.theme_status()
+                self.assertEqual(background.as_uri(), response["previews"]["Safe Theme"])
+                self.assertIn("unsupported", response["warning"])
+
+    def test_cache_returns_only_local_uri_reuses_verified_file_and_bounds_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            result = subprocess.CompletedProcess([], 0, self.png(), b"")
+            with patch.object(backend, "state_path", return_value=path), \
+                    patch.object(backend, "bounded_run", return_value=result) as run, \
+                    patch.object(backend, "MAX_CACHE_FILES", 2), \
+                    patch.object(backend, "MAX_CACHE_BYTES", len(self.png()) * 2):
+                response = backend.thumbnail(self.URL)
+                self.assertTrue(response["url"].startswith("file://"))
+                local = Path(backend.urllib.parse.unquote(backend.urllib.parse.urlsplit(response["url"]).path))
+                self.assertEqual(self.png(), local.read_bytes())
+                self.assertEqual(0o600, local.stat().st_mode & 0o777)
+                self.assertEqual(0o700, local.parent.stat().st_mode & 0o777)
+                self.assertEqual(response, backend.thumbnail(self.URL))
+                self.assertEqual(1, run.call_count)
+                backend.thumbnail(self.URL.replace("abcdefghijk", "ABCDEFGHIJK"))
+                backend.thumbnail(self.URL.replace("abcdefghijk", "01234567890"))
+                self.assertEqual(2, len(list(local.parent.glob("*.img"))))
+                self.assertFalse(local.exists())
+
+    def test_cache_refuses_symlinks_and_unexpected_files_without_removing_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            cache = base / "thumbnails"
+            cache.mkdir()
+            name = backend.hashlib.sha256(self.URL.encode()).hexdigest() + ".img"
+            outside = base / "user-image"
+            outside.write_bytes(self.png())
+            path = cache / name
+            path.symlink_to(outside)
+            with patch.object(backend, "state_path", return_value=base / "state.json"), \
+                    patch.object(backend, "bounded_run") as run:
+                with self.assertRaisesRegex(RuntimeError, "private regular file"):
+                    backend.thumbnail(self.URL)
+                run.assert_not_called()
+                self.assertTrue(path.is_symlink())
+                path.unlink()
+                path.write_bytes(self.png())
+                arbitrary = cache / "user-photo.png"
+                arbitrary.write_bytes(b"keep me")
+                with self.assertRaisesRegex(RuntimeError, "unexpected file"):
+                    backend.thumbnail(self.URL)
+                self.assertEqual(b"keep me", arbitrary.read_bytes())
+                self.assertEqual(self.png(), outside.read_bytes())
+                run.assert_not_called()
+
+    def test_download_failures_oversized_images_and_unsafe_urls_never_create_cache_entries(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(backend, "state_path", return_value=Path(directory) / "state.json"):
+            for url in ("file:///etc/passwd", "http://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg",
+                        self.URL + "?tracking=1", self.URL + "#fragment",
+                        "https://evil.example/image.png", "assets/img/plugins/image.webp"):
+                with self.subTest(url=url), self.assertRaisesRegex(ValueError, "not allowed"):
+                    backend.thumbnail(url)
+            for result, expected in (
+                    (subprocess.CompletedProcess([], 1, b"", b'{"error":"remote failure"}'), "remote failure"),
+                    (subprocess.CompletedProcess([], 0, b"x" * (backend.MAX_THUMBNAIL_BYTES + 1), b""), "size limit"),
+                    (subprocess.CompletedProcess([], 0, self.png(4097, 1), b""), "dimensions"),
+                    (subprocess.CompletedProcess([], 0, b"<svg/>", b""), "unsupported")):
+                with self.subTest(expected=expected), \
+                        patch.object(backend, "bounded_run", return_value=result), \
+                        self.assertRaisesRegex((ValueError, RuntimeError), expected):
+                    backend.thumbnail(self.URL)
+            with patch.object(backend, "bounded_run",
+                              side_effect=subprocess.TimeoutExpired("download", 15)):
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    backend.thumbnail(self.URL)
+            self.assertEqual([], list(Path(directory).glob("thumbnails/*.img")))
+
+    def test_redirects_enforce_scheme_host_path_credentials_and_query(self):
+        handler = backend.ThumbnailRedirectHandler()
+        request = backend.urllib.request.Request(self.URL)
+        valid = self.URL.replace("abcdefghijk", "ABCDEFGHIJK")
+        self.assertEqual(valid, handler.redirect_request(request, None, 302, "Found", {}, valid).full_url)
+        for url in ("http://i.ytimg.com/vi/abcdefghijk/mqdefault.jpg",
+                    "https://omarchy.org/news/image.png", self.URL + "?redirect=1",
+                    "https://user@i.ytimg.com/vi/abcdefghijk/mqdefault.jpg",
+                    "https://i.ytimg.com/not-an-image.jpg"):
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, "allowlist"):
+                handler.redirect_request(request, None, 302, "Found", {}, url)
+
+    def test_bounded_download_counts_actual_stream_bytes_and_checks_final_url(self):
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.geturl.return_value = self.URL
+        response.headers = {"Content-Length": "1"}
+        response.read1.side_effect = [b"a" * 32, b"b" * 33]
+        opener = Mock()
+        opener.open.return_value = response
+        with patch.object(backend.urllib.request, "build_opener", return_value=opener), \
+                patch.object(backend, "MAX_THUMBNAIL_BYTES", 64):
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                backend.download_thumbnail_bytes(self.URL)
+            response.geturl.return_value = "https://evil.example/image.png"
+            with self.assertRaisesRegex(ValueError, "allowlist"):
+                backend.download_thumbnail_bytes(self.URL)
+
+    def test_cli_invalid_thumbnail_emits_explicit_json_stderr(self):
+        result = subprocess.run([sys.executable, str(BACKEND_PATH), "thumbnail",
+                                 "https://evil.example/tracking.png"],
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(1, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertIn("not allowed", json.loads(result.stderr)["error"])
 
 
 if __name__ == "__main__":

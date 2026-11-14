@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 - 2026-11-14
+
+### Fixed
+
+- Filter fields no longer request native clipboard contents automatically.
+  Keyboard editing and filter chips remain available; native clipboard paste
+  and input-method composition are disabled for this field.
+- Helper operations now have whole-operation deadlines and exactly-once
+  completion, including failed starts, so busy indicators cannot remain stuck.
+- Subprocess output and local state reads are bounded before buffering or
+  parsing. State access enforces private, owner-controlled paths and serializes
+  read-modify-write transactions.
+- Feed previews are downloaded through a bounded, validated local cache instead
+  of unbounded native image transfers, with failures shown in the plugin.
+
 ## 0.2.0 - 2026-11-13
 
 ### Added

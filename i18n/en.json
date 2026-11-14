@@ -1,4 +1,5 @@
 {
+  "actions.filterInputHelp": "Type filter text directly. Clipboard paste and input-method composition are disabled to protect the shared shell.",
   "widget.tooltip": "All Things Omarchy",
   "widget.newItems": {
     "one": "All Things Omarchy: %1 new item",
