@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.0 - 2026-11-16
+
+### Added
+
+- Section listings, the Dashboard, System, Settings, and both navigation
+  sidebars now show a themed vertical scroll bar whenever their content
+  overflows. Drag the scroll bar with the mouse to move through a long list.
+  Content is inset so rows are never covered by the scroll bar.
+
+### Changed
+
+- The Dashboard is now a concise one-screen overview. Catch up, Source
+  freshness, and the separate source-error card are replaced by a Sources grid
+  with one tile per feed showing new and unread counts, error state, and last
+  refresh time on hover. System status is condensed to one line, and Upcoming
+  events and Saved to read show two one-line entries each.
+- Removed the Dashboard settings for catch-up, event, and saved item counts,
+  per-source catch-up toggles, and new-only mode. Existing Dashboard order and
+  visibility preferences carry over to the new Sources panel.
+
+### Fixed
+
+- My System no longer reports "The package database query failed" when
+  Omarchy is up to date; pacman's empty "no upgrades" result is now treated as
+  no update available.
+- Refreshing no longer holds the local state lock while feeds download, so
+  marking items read or saving them during a refresh no longer times out.
+  Downloaded results are merged into the latest saved state, and overlapping
+  refreshes are serialized.
+
 ## 0.2.1 - 2026-11-14
 
 ### Fixed

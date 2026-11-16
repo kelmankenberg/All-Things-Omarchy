@@ -16,11 +16,13 @@ sessions; collapsed navigation stays at 52 pixels.
 
 ## Sections
 
-- **Dashboard** is an actionable briefing: enabled feed source errors with a
-  retry button, new/unread items from enabled feeds, and configurable system,
-  events, and saved-item panels.
-  Items offer Open, Save/Unsave, and Mark Read actions; source refresh times
-  show when cached content was last successfully fetched. NEW means newly
+- **Dashboard** is a one-screen overview: a one-line System status with update
+  and check actions; a Sources grid with one tile per enabled feed showing its
+  new and unread counts (a failed source turns red, offers Refresh sources, and
+  shows the error on hover; otherwise hovering shows the last successful
+  refresh); the next two upcoming events; and up to two unread saved items.
+  Click a tile to open its section, or an event or saved item to open it.
+  NEW means newly
   discovered by a feed refresh, not necessarily published since your last
   visit. New badges remain until marked read; the bar icon changes color while
   any new items are unacknowledged.
@@ -73,16 +75,14 @@ sessions; collapsed navigation stays at 52 pixels.
   Read items use the theme's muted secondary color for their card borders;
   marking an item unread restores the primary borders. Thumbnails have no border.
   Read-status updates preserve the list's scroll position.
-  Dashboard provides the same actions for all loaded enabled-feed and Saved items,
-  and also marks viewed briefing items read after scrolling past them.
 - **Settings** groups appearance/reading, refresh, dashboard, and section
   preferences in its own left navigation, showing only the selected category.
   On narrow panels the category navigation shows icons with label tooltips.
   Choose comfortable or compact rows (compact hides excerpts),
   disable preview loading, or turn off marking items read when opened or
   scrolled past.
-  Dashboard panels can be hidden/reordered, with configurable item counts,
-  included catch-up sources, and a new-only mode.
+  Dashboard panels (System, Sources, Upcoming events, Saved to read) can be
+  hidden and reordered.
   Settings → Sections controls which optional feeds and tools appear in the
   main navigation. Hidden sections pause refresh-on-open, scheduled, manual,
   and Dashboard retry checks, and stop My System checks when hidden. Their

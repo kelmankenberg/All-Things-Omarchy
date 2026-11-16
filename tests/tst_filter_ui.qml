@@ -209,11 +209,11 @@ TestCase {
     verify(app.sectionIds.indexOf("dashboard") >= 0)
     verify(app.sectionIds.indexOf("saved") >= 0)
     verify(app.sectionIds.indexOf("settings") >= 0)
-    compare(app.catchUpItems.map(function(row) { return row.id }).join("|"), news.id)
+    compare(app.dashboardTileSources.join("|"), "themes|videos|news|releases|community")
     compare(app.upcomingItems.length, 0)
     verify(app.sourceIssues.indexOf("plugins") < 0)
     verify(app.sourceIssues.indexOf("events") < 0)
-    compare(app.visibleDashboardPanels.join("|"), "catchup|saved")
+    compare(app.visibleDashboardPanels.join("|"), "sources|saved")
     app.setSection("plugins")
     compare(app.currentSection, "dashboard")
     verify(findChild(app, "dashboardPanel_system") === null)
@@ -372,47 +372,28 @@ TestCase {
     compare(list.itemAtIndex(visibleIndex), visibleRow)
   }
 
-  function test_read_updates_preserve_dashboard_scroll_position() {
-    var rows = []
-    for (var index = 0; index < 12; index++)
-      rows.push(item("Dashboard " + index, "", "plugins"))
-    app.model = ({ items: { plugins: rows },
-      settings: { dashboard_system: false, dashboard_events: false, dashboard_saved: false } })
-    app.setSection("dashboard")
-    var dashboard = findChild(app, "dashboardPage")
-    wait(80)
-    dashboard.contentItem.contentY = 250
-    wait(50)
-    var position = dashboard.contentItem.contentY
-    var panel = findChild(app, "dashboardPanel_catchup")
-    app.model = Object.assign({}, app.model, { items: { plugins: rows.map(function(entry, index) {
-      return Object.assign({}, entry, { isRead: index === 0 })
-    }) } })
-    wait(80)
-    compare(dashboard.contentItem.contentY, position)
-    compare(findChild(app, "dashboardPanel_catchup"), panel)
-  }
+  function test_scroll_bars_are_visible_and_draggable() {
+    var list = prepareScrollReading({ auto_mark_read: false })
+    var bar = list.ScrollBar.vertical
+    tryVerify(function() { return bar.visible && bar.needed && bar.width > 0 })
+    var row = list.itemAtIndex(0)
+    verify(row.mapToItem(list, row.width, 0).x <= bar.mapToItem(list, 0, 0).x)
+    var thumb = bar.contentItem
+    mouseDrag(thumb, thumb.width / 2, thumb.height / 2, 0, list.height / 2)
+    tryVerify(function() { return list.contentY > list.originY + 50 })
 
-  function test_dashboard_items_are_marked_after_scrolling_past_them() {
-    var rows = []
-    for (var index = 0; index < 12; index++)
-      rows.push(item("Dashboard " + index, "", "plugins"))
-    app.model = ({ items: { plugins: rows },
-      settings: { dashboard_system: false, dashboard_events: false, dashboard_saved: false } })
-    app.setSection("dashboard")
-    var dashboard = findChild(app, "dashboardPage")
-    wait(80)
-    var firstTitle = findChild(app, "briefingTitle_plugins:Dashboard 0")
-    verify(firstTitle !== null)
-    var row = firstTitle.parent
-    var bottom = row.mapToItem(dashboard.contentItem.contentItem, 0, row.height).y
-    dashboard.contentItem.contentY = bottom + 5
-    wait(500)
-    compare(lastMutation, "")
-    tryVerify(function() { return lastMutation.indexOf("mark-read-items:") === 0 }, 1000)
-    var ids = JSON.parse(lastMutation.substring("mark-read-items:".length))
-    verify(ids.indexOf("plugins:Dashboard 0") >= 0)
-    verify(ids.indexOf("plugins:Dashboard 11") < 0)
+    testCase.Window.window.height = 300
+    testCase.height = 300
+    app.setSection("settings")
+    findChild(app, "settingsNav_refresh").clicked()
+    var settings = findChild(app, "settingsContentScroll")
+    var settingsBar = settings.ScrollBar.vertical
+    tryVerify(function() { return settingsBar.visible && settingsBar.needed })
+    var settingsThumb = settingsBar.contentItem
+    mouseDrag(settingsThumb, settingsThumb.width / 2, settingsThumb.height / 2, 0, settings.height / 3)
+    tryVerify(function() { return settings.contentItem.contentY > 30 })
+    testCase.Window.window.height = 660
+    testCase.height = 660
   }
 
   function test_scroll_read_waits_for_busy_work_and_cancels_when_hidden() {
@@ -637,22 +618,6 @@ TestCase {
     compare(card.border.color, Qt.color(Commons.Color.popups.border))
     compare(findChild(card, "itemPreview").border.width, 0)
 
-    app.setSection("dashboard")
-    var eventId = fixtureModel.items.events[1].id
-    app.model = fixtureModel
-    var divider = findChild(app, "briefingBorder_" + eventId)
-    verify(divider !== null)
-    compare(divider.color, Qt.color(Commons.Color.popups.border))
-    app.model = Object.assign({}, fixtureModel, { items: Object.assign({}, fixtureModel.items, {
-      events: fixtureModel.items.events.map(function(event) {
-        return Object.assign({}, event, { isRead: true })
-      })
-    }) })
-    divider = findChild(app, "briefingBorder_" + eventId)
-    compare(divider.color, Commons.Color.muted)
-    app.model = fixtureModel
-    divider = findChild(app, "briefingBorder_" + eventId)
-    compare(divider.color, Qt.color(Commons.Color.popups.border))
   }
 
   function test_item_actions_are_borderless_and_highlight_on_hover() {
@@ -789,59 +754,53 @@ TestCase {
     verify(!versionButton.enabled && !packageButton.enabled)
   }
 
-  function test_dashboard_prioritizes_unread_discoveries_and_saved_queue() {
-    var discovery = Object.assign(item("<b>New plugin</b>", "", "plugins"), { isNew: true })
-    var read = Object.assign(item("Already read", "", "plugins"), { isNew: true, isRead: true })
-    var recent = Object.assign(item("Recent news", "", "news"), { timestamp: 100 })
-    var saved = Object.assign(item("Saved story", "", "news"), { isSaved: true })
+  function test_dashboard_source_tiles_and_saved_links_are_compact() {
+    var saved = Object.assign(item("<b>Saved story</b>", "", "news"),
+      { isSaved: true, url: "https://omarchy.org/news/saved/" })
+    var read = Object.assign(item("Read story", "", "news"), { isSaved: true, isRead: true })
+    var extra = []
+    for (var index = 0; index < 3; ++index)
+      extra.push(Object.assign(item("Extra " + index, "", "news"), { isSaved: true }))
     app.model = ({
-      items: {
-        plugins: [read, discovery], news: [recent], themes: [item("Undated", "", "themes")],
-        saved: [read, saved], manual: [item("Reference", "", "manual")]
-      }
+      items: { plugins: [item("Plugin", "", "plugins")], manual: [item("Ref", "", "manual")],
+        saved: [read, saved].concat(extra) },
+      newCounts: { plugins: 2 }, unreadCounts: { plugins: 5 },
+      errors: { manual: "offline" }
     })
-    app.queries = ({ plugins: "does not match" })
-    app.dateRanges = ({ news: "today" })
     app.setSection("dashboard")
-    compare(app.catchUpItems.map(function(row) { return row.name }).join("|"),
-      "<b>New plugin</b>|Recent news|Undated")
-    compare(app.readingQueue.length, 1)
-    compare(app.readingQueue[0].id, saved.id)
-    var title = findChild(app, "briefingTitle_" + discovery.id)
-    verify(title !== null)
-    compare(title.textFormat, Text.PlainText)
-    compare(title.text, "<b>New plugin</b>")
-    var save = findChild(app, "briefingSave_" + discovery.id)
-    save.clicked()
-    compare(lastMutation, "toggle-saved:" + discovery.id)
-    var markRead = findChild(app, "briefingRead_" + discovery.id)
-    markRead.clicked()
-    compare(lastMutation, "toggle-read:" + discovery.id)
-    var unsave = findChild(app, "briefingSave_" + saved.id)
-    compare(unsave.text, app.t("actions.unsave"))
-    unsave.clicked()
-    compare(lastMutation, "toggle-saved:" + saved.id)
-    app.busy = true
-    verify(!save.enabled && !markRead.enabled && !unsave.enabled)
-    app.busy = false
-    app.model = ({ items: { plugins: [read], saved: [] } })
-    compare(app.catchUpItems.length, 0)
-    compare(app.readingQueue.length, 0)
-    verify(findChild(app, "dashboardCaughtUp").visible)
+    compare(app.readingQueue.length, 4)
+    var tile = findChild(app, "dashboardTile_plugins")
+    verify(tile !== null)
+    compare(findChild(app, "dashboardTileDetail_plugins").text, "dashboard.counts %1 %2".arg("2").arg("5"))
+    compare(findChild(app, "dashboardTileDetail_themes").text, app.t("dashboard.allRead"))
+    app.model = Object.assign({}, app.model, { newCounts: {}, unreadCounts: { plugins: 5 } })
+    compare(findChild(app, "dashboardTileDetail_plugins").text, "dashboard.unread %1 %2".arg("5"))
+    var themesTile = findChild(app, "dashboardTile_themes")
+    verify(Math.abs(tile.width - themesTile.width) <= 1)
+    compare(findChild(app, "dashboardTileDetail_manual").text, app.t("dashboard.sourceFailed"))
+    verify(findChild(app, "dashboardTile_hotkeys") === null)
+    tile.clicked()
+    compare(app.currentSection, "plugins")
+    app.setSection("dashboard")
+    var link = findChild(app, "dashboardLink_" + saved.id)
+    verify(link !== null)
+    compare(link.text, "<b>Saved story</b>")
+    var tooltip = findChild(link, "dashboardLinkTooltip")
+    compare(tooltip.contentItem.textFormat, Text.PlainText)
+    verify(tooltip.text.indexOf("<b>Saved story</b>") >= 0)
+    verify(findChild(app, "dashboardLink_" + extra[2].id) === null)
+    verify(findChild(app, "dashboardQueueMore").visible)
+    link.clicked()
+    compare(openedUrl, saved.url)
+    app.model = ({ items: { saved: [] } })
     verify(findChild(app, "dashboardQueueEmpty").visible)
-
-    var catalog = []
-    for (var index = 0; index < 12; ++index)
-      catalog.push(Object.assign(item("Plugin " + index, "", "plugins"), { timestamp: 1000 - index }))
-    app.model = ({ items: { plugins: catalog, news: [recent], themes: [item("Theme", "", "themes")] } })
-    compare(app.catchUpItems.slice(0, 3).map(function(row) { return row.name }).join("|"),
-      "Plugin 0|Recent news|Theme")
   }
 
   function test_dashboard_events_expire_and_layout_adapts() {
     app.setSection("dashboard")
     compare(app.upcomingItems.map(function(row) { return row.name }).join("|"), "Soon|Later")
-    verify(findChild(app, "briefingTitle_events:Past") === null)
+    verify(findChild(app, "dashboardLink_events:Past") === null)
+    verify(findChild(app, "dashboardLink_events:Soon") !== null)
     verify(app.eventDescription(app.upcomingItems[0]).indexOf("dashboard.inHours") >= 0)
     app.currentTime = 200000
     compare(app.upcomingItems.map(function(row) { return row.name }).join("|"), "Later")
@@ -857,26 +816,29 @@ TestCase {
     testCase.width = 760
     tryCompare(grid, "columns", 1)
     var dashboard = findChild(app, "dashboardPage")
-    verify(dashboard.contentHeight > dashboard.height)
+    verify(dashboard.contentHeight <= dashboard.height)
   }
 
-  function test_dashboard_system_attention_retry_and_freshness() {
+  function test_dashboard_system_status_and_source_retry() {
     app.model = Object.assign({}, fixtureModel, {
       lastFetched: { plugins: 100 },
       errors: { news: "<b>Network failed</b>" }
     })
     app.setSection("dashboard")
     compare(systemRequests, 1)
-    var sourceAttention = findChild(app, "dashboardSourceAttention")
-    verify(sourceAttention.visible)
     var retry = findChild(app, "dashboardRetrySourcesButton")
+    verify(retry.visible)
     retry.clicked()
     compare(refreshRequests, 1)
     app.busy = true
     verify(!retry.enabled)
     app.busy = false
-    verify(findChild(app, "dashboardFreshness_plugins").text.indexOf("dashboard.refreshed") === 0)
-    compare(findChild(app, "dashboardFreshness_news").text, app.t("dashboard.notRefreshed"))
+    var pluginTooltip = findChild(findChild(app, "dashboardTile_plugins"), "dashboardSourceTooltip")
+    var newsTooltip = findChild(findChild(app, "dashboardTile_news"), "dashboardSourceTooltip")
+    verify(pluginTooltip.text.indexOf("dashboard.refreshed") === 0)
+    compare(newsTooltip.text, "<b>Network failed</b>")
+    compare(newsTooltip.contentItem.textFormat, Text.PlainText)
+    compare(findChild(app, "dashboardTileDetail_news").textFormat, Text.PlainText)
     var status = findChild(app, "dashboardSystemStatus")
     compare(status.text, app.t("system.unknown"))
     compare(status.textFormat, Text.PlainText)
@@ -903,7 +865,7 @@ TestCase {
     verify(!update.visible)
     compare(status.text, app.t("system.none"))
     app.model = fixtureModel
-    verify(!sourceAttention.visible)
+    verify(!retry.visible)
   }
 
   function test_settings_controls_change_preview_density_and_read_behavior() {
@@ -933,35 +895,21 @@ TestCase {
     compare(lastMutation, "mark-read:" + article.id)
   }
 
-  function test_dashboard_preferences_control_order_visibility_counts_and_sources() {
+  function test_dashboard_preferences_control_order_and_visibility() {
     app.setSection("settings")
     findChild(app, "settingsNav_dashboard").clicked()
     findChild(app, "dashboardUp_saved").clicked()
-    compare(lastSetting, "dashboardOrder:system,catchup,saved,events")
-    findChild(app, "setting_catchUpLimit").activated(0)
-    compare(lastSetting, "catchUpLimit:4")
-    var items = []
-    for (var index = 0; index < 10; ++index)
-      items.push(item("P" + index, "", "plugins"))
-    app.model = ({ items: { plugins: items }, settings: {
-      dashboardOrder: "saved,events,catchup,system", dashboard_system: false, catchUpLimit: 4
+    compare(lastSetting, "dashboardOrder:system,sources,saved,events")
+    verify(findChild(app, "setting_catchUpLimit") === null)
+    findChild(app, "setting_dashboard_sources").toggled()
+    compare(lastSetting.indexOf("dashboard_sources:"), 0)
+    app.model = ({ items: { plugins: [item("P", "", "plugins")] }, settings: {
+      dashboardOrder: "saved,events,sources,system", dashboard_system: false
     } })
     app.setSection("dashboard")
     verify(findChild(app, "dashboardPanel_system") === null)
-    compare(app.catchUpItems.length, 10)
-    compare(app.catchUpItems[3].id, "plugins:P3")
-    var panel = findChild(app, "dashboardPanel_catchup")
-    verify(panel !== null && panel.item !== null)
-    tryVerify(function() { return findChild(app, "briefingTitle_plugins:P3") !== null })
-    verify(findChild(app, "briefingTitle_plugins:P4") === null)
+    verify(findChild(app, "dashboardPanel_sources") !== null)
     compare(app.dashboardOrder[0], "saved")
-    app.model = Object.assign({}, app.model, { settings: {
-      dashboardSource_plugins: false, dashboardNewOnly: true
-    } })
-    compare(app.catchUpItems.length, 0)
-    var newItem = Object.assign(items[0], { isNew: true })
-    app.model = { items: { plugins: [newItem, items[1]] }, settings: { dashboardNewOnly: true } }
-    compare(app.catchUpItems.length, 1)
   }
 
   function test_manual_system_checks_remain_available_with_automatic_checks_disabled() {
@@ -1048,7 +996,7 @@ TestCase {
     findChild(app, "settingsNav_general").clicked()
     tryCompare(scroll.contentItem, "contentY", 0)
     verify(findChild(app, "setting_showPreviews") !== null)
-    tryVerify(function() { return findChild(app, "setting_catchUpLimit") === null })
+    tryVerify(function() { return findChild(app, "setting_dashboard_sources") === null })
 
     findChild(app, "settingsNav_videos").clicked()
     verify(findChild(app, "setting_videosLimit").visible)

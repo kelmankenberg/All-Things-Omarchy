@@ -325,6 +325,15 @@ else:
             response = backend.system_status()
         self.assertEqual({"status": "unknown", "detail": "Database unavailable"}, response["update"])
 
+    def test_system_status_treats_empty_pacman_query_as_no_update(self):
+        ok = SimpleNamespace(returncode=0, stdout="value", stderr="")
+        none = SimpleNamespace(returncode=2, stdout="", stderr="")
+        empty_query = SimpleNamespace(returncode=1, stdout="", stderr="")
+        with patch.object(backend, "system_command", side_effect=[
+                (ok, ""), (ok, ""), (none, ""), (empty_query, "")]):
+            response = backend.system_status()
+        self.assertEqual({"status": "none", "detail": ""}, response["update"])
+
     def test_system_status_does_not_hide_missing_or_timed_out_commands(self):
         with patch.object(backend, "bounded_run",
                           side_effect=subprocess.TimeoutExpired("checkupdates", 60)):
@@ -598,17 +607,18 @@ else:
             "showPreviews": "false", "refresh_news": False,
             "catchUpLimit": "12", "density": "compact",
             "dashboardOrder": "saved,events,catchup,system",
-            "savedLimit": "999",
+            "dashboard_catchUp": "false",
         })
         self.assertIs(settings["refreshOnOpen"], False)
         self.assertEqual(150, settings["videosLimit"])
         self.assertNotIn("youtubeRange", settings)
         self.assertIs(settings["showPreviews"], False)
         self.assertIs(settings["refresh_news"], False)
-        self.assertEqual(12, settings["catchUpLimit"])
+        self.assertNotIn("catchUpLimit", settings)
         self.assertEqual("compact", settings["density"])
-        self.assertEqual("saved,events,catchup,system", settings["dashboardOrder"])
-        self.assertNotIn("savedLimit", settings)
+        self.assertEqual("saved,events,sources,system", settings["dashboardOrder"])
+        self.assertIs(settings["dashboard_sources"], False)
+        self.assertNotIn("dashboard_catchUp", settings)
         periodic = backend.valid_settings({"refreshInterval": "60", "periodicRefresh": "false"})
         self.assertEqual(60, periodic["refreshInterval"])
         self.assertIs(periodic["periodicRefresh"], False)
@@ -842,7 +852,8 @@ else:
         state = backend.empty_state()
         state["settings"]["refresh_news"] = False
         with patch.object(backend, "load_state", return_value=state), \
-                patch.object(backend, "perform_fetch", return_value={}) as fetch, patch("builtins.print"):
+                patch.object(backend, "download_sources", return_value=({}, {})), \
+                    patch.object(backend, "merge_fetch", return_value={}) as fetch, patch("builtins.print"):
             with patch.object(sys, "argv", ["Backend.py", "fetch", "on-open"]):
                 backend.main()
             self.assertNotIn("news", fetch.call_args.args[1])
@@ -869,6 +880,31 @@ else:
                 backend.main()
             self.assertEqual([], fetch.call_args.args[1])
 
+    def test_fetch_downloads_without_state_lock_and_keeps_concurrent_changes(self):
+        rows = [{"id": "plugins:new", "kind": "plugins", "name": "New",
+                 "url": "https://github.com/example/new"}]
+
+        def download(selected, settings):
+            with self.assertRaisesRegex(RuntimeError, "Another refresh"):
+                with backend.advisory_lock(backend.state_lock_path().with_name(".fetch.lock"),
+                                           timeout=0.1, timeout_message="Another refresh"):
+                    self.fail("Concurrent refresh acquired the lock")
+            with backend.advisory_lock(backend.state_lock_path(), timeout=0.2):
+                state = backend.load_state()
+                state["readIds"].append("plugins:read-during-fetch")
+                backend.save_state(state)
+            return {"plugins": (rows, "")}, {}
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {"XDG_STATE_HOME": directory}), \
+                patch.object(backend, "download_sources", side_effect=download), \
+                patch("builtins.print"), \
+                patch.object(sys, "argv", ["Backend.py", "fetch"]):
+            backend.main()
+            state = backend.load_state()
+        self.assertIn("plugins:read-during-fetch", state["readIds"])
+        self.assertEqual("New", state["sources"]["plugins"]["items"][0]["name"])
+
     def test_hidden_sections_are_excluded_from_all_refresh_modes_and_direct_fetches(self):
         state = backend.empty_state()
         state["settings"]["section_news"] = False
@@ -881,7 +917,8 @@ else:
         for args in (["fetch"], ["fetch", "on-open"], ["fetch", "scheduled"]):
             with self.subTest(args=args), \
                     patch.object(backend, "load_state", return_value=state), \
-                    patch.object(backend, "perform_fetch", return_value={}) as fetch, \
+                    patch.object(backend, "download_sources", return_value=({}, {})), \
+                    patch.object(backend, "merge_fetch", return_value={}) as fetch, \
                     patch("builtins.print"):
                 with patch.object(sys, "argv", ["Backend.py"] + args):
                     backend.main()

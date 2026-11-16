@@ -84,17 +84,19 @@ Rectangle {
   readonly property string pluginVersion: String(model.pluginVersion || "")
   readonly property bool compactRows: setting("density", "comfortable") === "compact"
   readonly property bool showPreviews: setting("showPreviews", true)
-  readonly property var dashboardOrder: String(setting("dashboardOrder", "system,catchup,events,saved")).split(",")
+  readonly property var dashboardOrder: String(setting("dashboardOrder", "system,sources,events,saved")).split(",")
   readonly property var visibleDashboardPanels: dashboardOrder.filter(function(panel) {
     return (panel !== "system" || root.sectionEnabled("system"))
       && (panel !== "events" || root.sectionEnabled("events"))
   })
-  readonly property var catchUpItems: dashboardItems("catchUp")
   readonly property var upcomingItems: dashboardItems("events")
   readonly property var readingQueue: dashboardItems("saved")
   readonly property var sourceIssues: visibleSourceIds.filter(function(section) {
     return !!(root.model.errors || {})[section]
   })
+  readonly property var dashboardTileSources: visibleBriefingSources.concat(sourceIssues.filter(function(section) {
+    return root.visibleBriefingSources.indexOf(section) < 0
+  }))
   readonly property var sectionIcons: ({
     dashboard: "\uf00a", plugins: "\uf12e", themes: "\uf1fc",
     videos: "\uf16a", news: "\uf1ea", releases: "\uf135", manual: "\uf02d",
@@ -134,6 +136,40 @@ Rectangle {
         ? Commons.Color.accent : Commons.Color.popups.border
       opacity: control.enabled ? 1 : 0.5
     }
+  }
+
+  readonly property real scrollGutter: Style.space(14)
+
+  component ThemedScrollBar: ScrollBar {
+    id: bar
+    readonly property bool needed: size < 0.999
+    policy: needed ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+    hoverEnabled: true
+    minimumSize: 0.08
+    padding: Style.space(2)
+    contentItem: Rectangle {
+      implicitWidth: Style.space(6)
+      implicitHeight: Style.space(32)
+      radius: width / 2
+      color: bar.pressed || bar.hovered ? Commons.Color.accent : Commons.Color.popups.text
+      opacity: bar.pressed ? 0.95 : bar.hovered ? 0.75 : 0.4
+    }
+    background: Rectangle {
+      implicitWidth: Style.space(10)
+      radius: width / 2
+      color: "transparent"
+      border.width: 1
+      border.color: Commons.Color.popups.border
+      opacity: bar.hovered || bar.pressed ? 0.9 : 0.5
+    }
+  }
+
+  component ViewScrollBar: ThemedScrollBar {
+    required property Item view
+    parent: view
+    x: view.mirrored ? 0 : view.width - width
+    y: view.topPadding
+    height: view.availableHeight
   }
 
   component HoverButton: OutlineButton {
@@ -208,7 +244,12 @@ Rectangle {
   }
 
   component BriefingPanel: Rectangle {
+    id: briefingPanel
     property string title: ""
+    property string actionText: ""
+    property string actionObjectName: ""
+    property bool actionEnabled: true
+    signal actionClicked()
     default property alias contents: panelContents.data
     Layout.fillWidth: true
     implicitHeight: panelContents.implicitHeight + Style.space(20)
@@ -220,73 +261,112 @@ Rectangle {
       id: panelContents
       anchors.fill: parent
       anchors.margins: Style.space(10)
-      spacing: Style.space(8)
-      BriefingText {
-        text: parent.parent.title
-        font.pixelSize: Style.font.subtitle
-        font.bold: true
+      spacing: Style.space(6)
+      RowLayout {
+        visible: briefingPanel.title !== "" || briefingPanel.actionText !== ""
+        Layout.fillWidth: true
+        BriefingText {
+          text: briefingPanel.title
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+          elide: Text.ElideRight
+          wrapMode: Text.NoWrap
+        }
+        HoverButton {
+          objectName: briefingPanel.actionObjectName
+          visible: briefingPanel.actionText !== ""
+          implicitHeight: Style.space(26)
+          text: briefingPanel.actionText
+          enabled: briefingPanel.actionEnabled
+          onClicked: briefingPanel.actionClicked()
+        }
       }
     }
   }
 
-  component BriefingItem: ColumnLayout {
-    id: briefingItem
+  component DashboardLink: HoverButton {
     required property var item
-    readonly property var readItem: item
+    property string tooltipText: ""
+    objectName: "dashboardLink_" + item.id
     Layout.fillWidth: true
-    spacing: Style.space(root.compactRows ? 2 : 4)
-    BriefingText {
-      objectName: "briefingTitle_" + briefingItem.item.id
-      text: briefingItem.item.name
-      font.bold: true
-      maximumLineCount: 2
-      elide: Text.ElideRight
+    implicitHeight: Style.space(28)
+    leftPadding: Style.space(6)
+    rightPadding: Style.space(6)
+    enabled: !root.busy
+    onClicked: root.openItem(item)
+    PlainToolTip {
+      objectName: "dashboardLinkTooltip"
+      visible: parent.hovered && parent.tooltipText !== ""
+      text: parent.tooltipText
     }
-    BriefingText {
-      text: briefingItem.item.kind === "events"
-        ? root.eventDescription(briefingItem.item)
-        : root.sectionTitle(briefingItem.item.kind)
-          + (briefingItem.item.isNew ? " · " + root.t("listing.new") : "")
-      opacity: 0.68
-      font.pixelSize: Style.font.bodySmall
+  }
+
+  component PlainToolTip: ToolTip {
+    id: tip
+    delay: 400
+    contentItem: Text {
+      text: tip.text
+      textFormat: Text.PlainText
+      font: tip.font
+      wrapMode: Text.Wrap
+      color: tip.palette.toolTipText
     }
-    BriefingText {
-      visible: !!briefingItem.item.summary && !root.compactRows
-      text: briefingItem.item.summary || ""
-      opacity: 0.76
-      font.pixelSize: Style.font.bodySmall
-      maximumLineCount: 2
-      elide: Text.ElideRight
+  }
+
+  component SourceTile: Button {
+    id: tile
+    property string section: ""
+    readonly property string error: String((root.model.errors || {})[section] || "")
+    readonly property int newItems: root.count(section, "new")
+    readonly property int unreadItems: root.count(section, "unread")
+    readonly property string detail: error ? root.t("dashboard.sourceFailed")
+      : root.isReference(section) ? root.t("dashboard.reference").arg(Commons.I18n.formatNumber(
+        ((root.model.items || {})[section] || []).length))
+      : newItems + unreadItems === 0 ? root.t("dashboard.allRead")
+      : newItems === 0 ? root.t("dashboard.unread").arg(Commons.I18n.formatNumber(unreadItems))
+      : root.t("dashboard.counts").arg(Commons.I18n.formatNumber(newItems)).arg(Commons.I18n.formatNumber(unreadItems))
+    objectName: "dashboardTile_" + section
+    Layout.fillWidth: true
+    hoverEnabled: true
+    padding: Style.space(8)
+    Accessible.name: root.sectionTitle(section) + ", " + detail
+    onClicked: root.setSection(section)
+    PlainToolTip {
+      objectName: "dashboardSourceTooltip"
+      visible: tile.hovered
+      text: tile.error || root.sourceRefreshTime(tile.section)
     }
-    RowLayout {
-      Layout.fillWidth: true
-      spacing: Style.space(4)
-      HoverButton {
-        objectName: "briefingOpen_" + briefingItem.item.id
-        text: root.t("actions.open")
-        enabled: !root.busy
-        onClicked: root.openItem(briefingItem.item)
+    contentItem: ColumnLayout {
+      spacing: Style.space(2)
+      Text {
+        Layout.fillWidth: true
+        textFormat: Text.PlainText
+        text: (root.sectionIcons[tile.section] || "") + "  " + root.sectionTitle(tile.section)
+        color: tile.newItems > 0 ? Commons.Color.accent : Commons.Color.popups.text
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+        font.bold: true
+        elide: Text.ElideRight
       }
-      HoverButton {
-        objectName: "briefingSave_" + briefingItem.item.id
-        text: briefingItem.item.isSaved ? root.t("actions.unsave") : root.t("actions.save")
-        enabled: !root.busy
-        onClicked: root.mutationRequested("toggle-saved", briefingItem.item.id)
+      Text {
+        objectName: "dashboardTileDetail_" + tile.section
+        Layout.fillWidth: true
+        textFormat: Text.PlainText
+        text: tile.detail
+        color: tile.error ? Commons.Color.urgent : Commons.Color.popups.text
+        opacity: tile.error ? 1 : 0.7
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        elide: Text.ElideRight
       }
-      HoverButton {
-        objectName: "briefingRead_" + briefingItem.item.id
-        text: briefingItem.item.isRead ? root.t("actions.unread") : root.t("actions.read")
-        enabled: !root.busy
-        onClicked: root.mutationRequested("toggle-read", briefingItem.item.id)
-      }
-      Item { Layout.fillWidth: true }
     }
-    Rectangle {
-      objectName: "briefingBorder_" + briefingItem.item.id
-      Layout.fillWidth: true
-      Layout.topMargin: Style.space(4)
-      implicitHeight: 1
-      color: root.itemBorderColor(briefingItem.item)
+    background: Rectangle {
+      radius: Style.cornerRadius
+      color: tile.visualFocus ? Style.focusFillFor(Commons.Color.popups.text, Commons.Color.accent)
+        : tile.hovered ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent) : "transparent"
+      border.width: tile.visualFocus ? 2 : 1
+      border.color: tile.error ? Commons.Color.urgent
+        : tile.newItems > 0 || tile.hovered ? Commons.Color.accent : Commons.Color.popups.border
     }
   }
 
@@ -354,7 +434,7 @@ Rectangle {
   }
 
   function dashboardPanelTitle(panel) {
-    return t(({ system: "dashboard.systemAttention", catchup: "dashboard.catchUp",
+    return t(({ system: "dashboard.systemTitle", sources: "dashboard.sources",
       events: "dashboard.upcoming", saved: "dashboard.readingQueue" })[panel])
   }
 
@@ -396,16 +476,6 @@ Rectangle {
     visibleSourceIds.concat(["saved"]).forEach(function(section) {
       rows = rows.concat((root.model.items || {})[section] || [])
     })
-    return rows
-  }
-
-  function collectReadRows(parent) {
-    var rows = []
-    for (var index = 0; index < parent.children.length; index++) {
-      var child = parent.children[index]
-      if (child.readItem) rows.push(child)
-      else rows = rows.concat(collectReadRows(child))
-    }
     return rows
   }
 
@@ -483,35 +553,18 @@ Rectangle {
     if (group === "saved") return (items.saved || []).filter(function(item) {
       return !item.isRead
     })
-    var rows = []
-    root.visibleBriefingSources.forEach(function(section, sourceIndex) {
-      if (!root.setting("dashboardSource_" + section, true)) return
-      var sourceRows = (items[section] || []).filter(function(item) {
-        return !item.isRead && (!root.setting("dashboardNewOnly", false) || item.isNew)
-      }).map(function(item, index) { return { item: item, index: index } })
-        .sort(function(a, b) {
-          if (!!a.item.isNew !== !!b.item.isNew) return a.item.isNew ? -1 : 1
-          return Number(b.item.timestamp || 0) - Number(a.item.timestamp || 0) || a.index - b.index
-        })
-      var newRank = 0
-      var unreadRank = 0
-      sourceRows.forEach(function(entry) {
-        rows.push({ item: entry.item, rank: entry.item.isNew ? newRank++ : unreadRank++, sourceIndex: sourceIndex })
-      })
-    })
-    // Give each source a turn so large catalogs cannot crowd out the other feeds.
-    return rows.sort(function(a, b) {
-      if (!!a.item.isNew !== !!b.item.isNew) return a.item.isNew ? -1 : 1
-      return a.rank - b.rank || Number(b.item.timestamp || 0) - Number(a.item.timestamp || 0) || a.sourceIndex - b.sourceIndex
-    }).map(function(row) { return row.item })
+    return []
+  }
+
+  function eventCountdown(item) {
+    var hours = Math.max(1, Math.ceil((Number(item.timestamp) * 1000 - currentTime) / 3600000))
+    return hours < 24 ? t("dashboard.inHours").arg(Qt.locale(Commons.I18n.formatLocale).toString(hours, "f", 0))
+      : t("dashboard.inDays").arg(Qt.locale(Commons.I18n.formatLocale).toString(Math.ceil(hours / 24), "f", 0))
   }
 
   function eventDescription(item) {
-    var hours = Math.max(1, Math.ceil((Number(item.timestamp) * 1000 - currentTime) / 3600000))
-    var remaining = hours < 24 ? t("dashboard.inHours").arg(Qt.locale(Commons.I18n.formatLocale).toString(hours, "f", 0))
-      : t("dashboard.inDays").arg(Qt.locale(Commons.I18n.formatLocale).toString(Math.ceil(hours / 24), "f", 0))
-    return [new Date(item.timestamp * 1000).toLocaleString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat),
-      remaining, item.author].filter(function(value) { return !!value }).join(" · ")
+    return [item.name, new Date(item.timestamp * 1000).toLocaleString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat),
+      eventCountdown(item), item.author].filter(function(value) { return !!value }).join(" · ")
   }
 
   function sourceRefreshTime(section) {
@@ -679,10 +732,13 @@ Rectangle {
 
           ScrollView {
             id: navigationScroll
+            objectName: "navigationScroll"
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
             contentWidth: availableWidth
+            rightPadding: ScrollBar.vertical.needed ? root.scrollGutter : 0
+            ScrollBar.vertical: ViewScrollBar { view: navigationScroll }
 
             Column {
               width: navigationScroll.availableWidth
@@ -878,55 +934,37 @@ Rectangle {
       objectName: "dashboardPage"
       clip: true
       contentWidth: availableWidth
+      rightPadding: ScrollBar.vertical.needed ? root.scrollGutter : 0
+      ScrollBar.vertical: ViewScrollBar { view: dashboardScroll }
       ColumnLayout {
         width: dashboardScroll.availableWidth
         spacing: Style.space(10)
 
-        ReadingTracker {
-          visible: false
-          viewport: dashboardScroll.contentItem
-          items: root.catchUpItems.concat(root.upcomingItems, root.readingQueue)
-          rowProvider: function() { return root.collectReadRows(dashboardScroll.contentItem) }
-        }
-
-        BriefingText {
-          text: root.t("dashboard.subtitle")
-          opacity: 0.76
-        }
         Component {
           id: systemBriefing
           BriefingPanel {
-            title: root.t("dashboard.systemAttention")
-            BriefingText {
-              objectName: "dashboardSystemStatus"
-              text: root.systemBusy ? root.t("system.checking")
-                : root.systemError || (root.systemData.update || {}).error
-                  || ((root.systemData.update || {}).status === "available"
-                    ? root.t("system.available").arg((root.systemData.update || {}).detail || "")
-                    : (root.systemData.update || {}).status === "none" ? root.t("system.none")
-                    : (root.systemData.update || {}).detail || root.t("system.unknown"))
-              color: root.systemError || (root.systemData.update || {}).status === "unknown"
-                ? Commons.Color.urgent : Commons.Color.popups.text
-            }
-            BriefingText {
-              visible: !!(root.systemData.version || {}).error
-              text: (root.systemData.version || {}).error || ""
-              color: Commons.Color.urgent
-            }
-            BriefingText {
-              visible: root.updateLaunching || root.updatePending || root.updateError !== ""
-              text: root.updateError || (root.updateLaunching
-                ? root.t("system.openingUpdate") : root.t("system.updateRequested").arg(root.updateLog))
-              color: root.updateError ? Commons.Color.urgent : Commons.Color.popups.text
-            }
-            BriefingText {
-              visible: (root.systemData.update || {}).status === "available"
-              text: root.t("system.updateExplanation")
-              font.pixelSize: Style.font.bodySmall
-              opacity: 0.76
-            }
             RowLayout {
               Layout.fillWidth: true
+              spacing: Style.space(8)
+              BriefingText {
+                Layout.fillWidth: false
+                text: root.t("dashboard.systemTitle")
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+              }
+              BriefingText {
+                objectName: "dashboardSystemStatus"
+                text: root.systemBusy ? root.t("system.checking")
+                  : root.systemError || (root.systemData.update || {}).error
+                    || ((root.systemData.update || {}).status === "available"
+                      ? root.t("system.available").arg((root.systemData.update || {}).detail || "")
+                      : (root.systemData.update || {}).status === "none" ? root.t("system.none")
+                      : (root.systemData.update || {}).detail || root.t("system.unknown"))
+                color: root.systemError || (root.systemData.update || {}).status === "unknown"
+                  ? Commons.Color.urgent : Commons.Color.popups.text
+                wrapMode: Text.NoWrap
+                elide: Text.ElideRight
+              }
               HoverButton {
                 objectName: "dashboardUpdateButton"
                 visible: (root.systemData.update || {}).status === "available"
@@ -944,83 +982,75 @@ Rectangle {
                 text: root.t("nav.system")
                 onClicked: root.setSection("system")
               }
-              Item { Layout.fillWidth: true }
             }
-          }
-        }
-        BriefingPanel {
-          objectName: "dashboardSourceAttention"
-          visible: root.sourceIssues.length > 0
-          title: root.t("dashboard.sourceAttention")
-          Repeater {
-            model: root.sourceIssues
-            delegate: BriefingText {
-              required property string modelData
-              text: root.sectionTitle(modelData) + ": " + String((root.model.errors || {})[modelData])
+            BriefingText {
+              visible: !!(root.systemData.version || {}).error
+              text: (root.systemData.version || {}).error || ""
               color: Commons.Color.urgent
               font.pixelSize: Style.font.bodySmall
             }
-          }
-          HoverButton {
-            objectName: "dashboardRetrySourcesButton"
-            text: root.t("dashboard.retrySources")
-            enabled: !root.busy
-            onClicked: root.refreshRequested()
+            BriefingText {
+              visible: root.updateLaunching || root.updatePending || root.updateError !== ""
+              text: root.updateError || (root.updateLaunching
+                ? root.t("system.openingUpdate") : root.t("system.updateRequested").arg(root.updateLog))
+              color: root.updateError ? Commons.Color.urgent : Commons.Color.popups.text
+              font.pixelSize: Style.font.bodySmall
+            }
+            BriefingText {
+              visible: (root.systemData.update || {}).status === "available"
+              text: root.t("system.updateExplanation")
+              font.pixelSize: Style.font.bodySmall
+              opacity: 0.76
+            }
           }
         }
         GridLayout {
           id: briefingGrid
           objectName: "briefingGrid"
           Layout.fillWidth: true
-          columns: width < Style.space(720) ? 1 : 2
+          columns: width < Style.space(640) ? 1 : 2
           columnSpacing: Style.space(10)
           rowSpacing: Style.space(10)
           Repeater {
             model: root.visibleDashboardPanels.filter(function(panel) {
-              return root.setting("dashboard_" + (panel === "catchup" ? "catchUp" : panel), true)
+              return root.setting("dashboard_" + panel, true)
             })
             delegate: Loader {
               required property string modelData
+              readonly property bool wide: modelData === "system" || modelData === "sources"
               objectName: "dashboardPanel_" + modelData
               Layout.fillWidth: true
               Layout.alignment: Qt.AlignTop
-              Layout.columnSpan: modelData === "system" ? briefingGrid.columns : 1
-              Layout.rowSpan: modelData === "catchup" && briefingGrid.columns === 2 ? 2 : 1
-              Layout.preferredWidth: briefingGrid.columns === 1 || modelData === "system" ? briefingGrid.width
-                : briefingGrid.width * (modelData === "catchup" ? 0.6 : 0.4)
+              Layout.columnSpan: wide ? briefingGrid.columns : 1
+              Layout.preferredWidth: briefingGrid.columns === 1 || wide ? briefingGrid.width
+                : (briefingGrid.width - briefingGrid.columnSpacing) / 2
               Layout.preferredHeight: item ? item.implicitHeight : 0
-              sourceComponent: modelData === "system" ? systemBriefing : modelData === "catchup" ? catchUpBriefing
+              sourceComponent: modelData === "system" ? systemBriefing : modelData === "sources" ? sourcesBriefing
                 : modelData === "events" ? eventsBriefing : savedBriefing
             }
           }
           Component {
-            id: catchUpBriefing
+            id: sourcesBriefing
             BriefingPanel {
-              Layout.alignment: Qt.AlignTop
-              title: root.t("dashboard.catchUp")
-              BriefingText {
-                text: root.t("dashboard.catchUpDescription")
-                font.pixelSize: Style.font.bodySmall
-                opacity: 0.76
-              }
-              BriefingText {
-                objectName: "dashboardCaughtUp"
-                visible: root.catchUpItems.length === 0
-                text: root.busy ? root.t("actions.loading") : root.t("dashboard.caughtUp")
-                opacity: 0.68
-              }
-              Repeater {
-                model: FeedModel { items: root.catchUpItems.slice(0, root.setting("catchUpLimit", 8)) }
-                delegate: BriefingItem {
-                  required property var entry
-                  item: entry
+              title: root.t("dashboard.sources")
+              actionText: root.sourceIssues.length > 0 ? root.t("dashboard.retryFailed") : ""
+              actionObjectName: "dashboardRetrySourcesButton"
+              actionEnabled: !root.busy
+              onActionClicked: root.refreshRequested()
+              GridLayout {
+                id: tileGrid
+                Layout.fillWidth: true
+                columns: Math.max(1, Math.floor((width + columnSpacing) / (Style.space(150) + columnSpacing)))
+                columnSpacing: Style.space(6)
+                rowSpacing: Style.space(6)
+                uniformCellWidths: true
+                Repeater {
+                  model: root.dashboardTileSources
+                  delegate: SourceTile {
+                    required property string modelData
+                    section: modelData
+                  }
                 }
-              }
-              BriefingText {
-                visible: root.catchUpItems.length > root.setting("catchUpLimit", 8)
-                text: root.t("dashboard.moreUnread").arg(root.setting("catchUpLimit", 8))
-                font.pixelSize: Style.font.bodySmall
-                opacity: 0.68
               }
             }
           }
@@ -1028,65 +1058,54 @@ Rectangle {
             id: eventsBriefing
             BriefingPanel {
               title: root.t("dashboard.upcoming")
+              actionText: root.t("dashboard.allEvents")
+              onActionClicked: root.setSection("events")
               BriefingText {
                 objectName: "dashboardNoEvents"
                 visible: root.upcomingItems.length === 0
                 text: root.busy ? root.t("actions.loading") : root.t("dashboard.noEvents")
+                font.pixelSize: Style.font.bodySmall
                 opacity: 0.68
               }
               Repeater {
-                model: FeedModel { items: root.upcomingItems.slice(0, root.setting("eventsLimit", 3)) }
-                delegate: BriefingItem {
+                model: FeedModel { items: root.upcomingItems.slice(0, 2) }
+                delegate: DashboardLink {
                   required property var entry
                   item: entry
+                  leadingIcon: root.sectionIcons.events
+                  text: entry.name + " · " + root.eventCountdown(entry)
+                  tooltipText: root.eventDescription(entry)
                 }
-              }
-              HoverButton {
-                text: root.t("dashboard.allEvents")
-                onClicked: root.setSection("events")
               }
             }
           }
           Component {
             id: savedBriefing
             BriefingPanel {
-              title: root.t("dashboard.readingQueue")
+              title: root.t("dashboard.savedUnread").arg(Commons.I18n.formatNumber(root.readingQueue.length))
+              actionText: root.t("dashboard.allSaved")
+              onActionClicked: root.setSection("saved")
               BriefingText {
                 objectName: "dashboardQueueEmpty"
                 visible: root.readingQueue.length === 0
                 text: root.t("dashboard.queueEmpty")
+                font.pixelSize: Style.font.bodySmall
                 opacity: 0.68
               }
               Repeater {
-                model: FeedModel { items: root.readingQueue.slice(0, root.setting("savedLimit", 4)) }
-                delegate: BriefingItem {
+                model: FeedModel { items: root.readingQueue.slice(0, 2) }
+                delegate: DashboardLink {
                   required property var entry
                   item: entry
+                  leadingIcon: root.sectionIcons.saved
+                  text: entry.name
+                  tooltipText: entry.name + " · " + root.sectionTitle(entry.kind)
                 }
               }
-              HoverButton {
-                text: root.t("dashboard.allSaved")
-                onClicked: root.setSection("saved")
-              }
-            }
-          }
-        }
-        BriefingPanel {
-          title: root.t("dashboard.sourceFreshness")
-          visible: root.visibleSourceIds.length > 0
-          Repeater {
-            model: root.visibleSourceIds
-            delegate: RowLayout {
-              required property string modelData
-              Layout.fillWidth: true
-              HoverButton {
-                Layout.preferredWidth: Style.space(110)
-                text: root.sectionTitle(parent.modelData)
-                onClicked: root.setSection(parent.modelData)
-              }
               BriefingText {
-                objectName: "dashboardFreshness_" + parent.modelData
-                text: root.sourceRefreshTime(parent.modelData)
+                objectName: "dashboardQueueMore"
+                visible: root.readingQueue.length > 2
+                text: root.t("dashboard.moreSaved").arg(Commons.I18n.formatNumber(root.readingQueue.length - 2))
                 font.pixelSize: Style.font.bodySmall
                 opacity: 0.68
               }
@@ -1322,6 +1341,7 @@ Rectangle {
           listingScroll.positionViewAtBeginning()
         })
         model: FeedModel { items: listingScroll.rows }
+        ScrollBar.vertical: ThemedScrollBar { objectName: "listingScrollBar" }
         ReadingTracker {
           viewport: listingScroll
           items: listingScroll.rows
@@ -1336,7 +1356,7 @@ Rectangle {
           required property var entry
           readonly property var modelData: entry
           readonly property var readItem: modelData
-          width: listingScroll.width
+          width: listingScroll.width - root.scrollGutter
           implicitHeight: rowContent.implicitHeight + Style.space(root.compactRows ? 8 : 16)
           radius: Style.cornerRadius
           color: Commons.Color.popups.background
@@ -1487,6 +1507,8 @@ Rectangle {
       id: systemScroll
       clip: true
       contentWidth: availableWidth
+      rightPadding: root.scrollGutter
+      ScrollBar.vertical: ViewScrollBar { view: systemScroll }
       ColumnLayout {
         width: systemScroll.availableWidth
         spacing: Style.space(12)
@@ -1726,6 +1748,8 @@ Rectangle {
         Layout.fillHeight: true
         clip: true
         contentWidth: availableWidth
+        rightPadding: ScrollBar.vertical.needed ? root.scrollGutter : 0
+        ScrollBar.vertical: ViewScrollBar { view: settingsNavigation }
         Column {
           width: settingsNavigation.availableWidth
           spacing: Style.space(4)
@@ -1767,6 +1791,8 @@ Rectangle {
         Layout.fillHeight: true
         clip: true
         contentWidth: availableWidth
+        rightPadding: root.scrollGutter
+        ScrollBar.vertical: ViewScrollBar { view: settingsScroll }
         ColumnLayout {
           width: settingsScroll.availableWidth
           spacing: Style.space(12)
@@ -1957,7 +1983,7 @@ Rectangle {
           required property int index
           Layout.fillWidth: true
           TogglePreference {
-            settingKey: "dashboard_" + (parent.modelData === "catchup" ? "catchUp" : parent.modelData)
+            settingKey: "dashboard_" + parent.modelData
             label: root.dashboardPanelTitle(parent.modelData)
           }
           HoverButton {
@@ -1974,31 +2000,6 @@ Rectangle {
             enabled: !root.busy && parent.index < root.visibleDashboardPanels.length - 1
             onClicked: root.moveDashboardPanel(parent.modelData, 1)
           }
-        }
-      }
-      ChoicePreference {
-        settingKey: "catchUpLimit"; label: root.t("settings.catchUpLimit")
-        values: [4, 8, 12, 16]; defaultValue: 8
-      }
-      ChoicePreference {
-        visible: root.sectionEnabled("events")
-        settingKey: "eventsLimit"; label: root.t("settings.eventsLimit")
-        values: [1, 3, 5]; defaultValue: 3
-      }
-      ChoicePreference {
-        settingKey: "savedLimit"; label: root.t("settings.savedLimit")
-        values: [2, 4, 8]; defaultValue: 4
-      }
-      TogglePreference {
-        settingKey: "dashboardNewOnly"; label: root.t("settings.newOnly"); defaultValue: false
-      }
-      BriefingText { text: root.t("settings.dashboardSources"); font.bold: true }
-      Repeater {
-        model: root.visibleBriefingSources
-        delegate: TogglePreference {
-          required property string modelData
-          settingKey: "dashboardSource_" + modelData
-          label: root.sectionTitle(modelData)
         }
       }
       HoverButton {

@@ -80,7 +80,7 @@ SOURCE_KEYS = ("plugins", "themes", "videos", "news", "releases", "manual", "hot
                "community", "events")
 OPTIONAL_SECTIONS = SOURCE_KEYS + ("system",)
 FILTER_SECTIONS = SOURCE_KEYS + ("saved",)
-DASHBOARD_PANELS = ("system", "catchUp", "events", "saved")
+DASHBOARD_PANELS = ("system", "sources", "events", "saved")
 DEFAULT_SETTINGS.update({
     "showPreviews": True, "density": "comfortable", "markReadOnOpen": True,
     "markReadOnScroll": True, "navigationWidth": 160,
@@ -88,13 +88,10 @@ DEFAULT_SETTINGS.update({
     "newItemNotifications": True,
     "periodicVideos": False,
     **{"section_" + section: True for section in OPTIONAL_SECTIONS},
-    "dashboardOrder": ",".join(DASHBOARD_PANELS), "dashboardNewOnly": False,
-    "catchUpLimit": 8, "eventsLimit": 3, "savedLimit": 4,
+    "dashboardOrder": ",".join(DASHBOARD_PANELS),
     **{"refresh_" + section: True for section in SOURCE_KEYS},
     **{"remember_" + section: True for section in FILTER_SECTIONS},
     **{"dashboard_" + panel: True for panel in DASHBOARD_PANELS},
-    **{"dashboardSource_" + section: True for section in
-       ("plugins", "themes", "videos", "news", "releases", "community")},
 })
 BOOLEAN_SETTINGS = {key for key, value in DEFAULT_SETTINGS.items() if isinstance(value, bool)}
 SETTING_VALUES.update({key: {"true", "false"} for key in BOOLEAN_SETTINGS})
@@ -103,17 +100,13 @@ SETTING_VALUES.update({
     "navigationWidth": {str(width) for width in range(160, 221)},
     "refreshInterval": {"10", "15", "20", "30", "45", "60"},
     "dashboardOrder": {",".join(order).lower() for order in permutations(DASHBOARD_PANELS)},
-    "catchUpLimit": {"4", "8", "12", "16"},
-    "eventsLimit": {"1", "3", "5"},
-    "savedLimit": {"2", "4", "8"},
 })
 # Settings values are normalized to lowercase on disk and at the CLI boundary.
 DEFAULT_SETTINGS["dashboardOrder"] = DEFAULT_SETTINGS["dashboardOrder"].lower()
 SETTING_GROUPS = {
     "general": {"showPreviews", "density", "markReadOnOpen", "markReadOnScroll", "navigationWidth"},
     "sections": {"section_" + section for section in OPTIONAL_SECTIONS},
-    "dashboard": {key for key in DEFAULT_SETTINGS if key.startswith("dashboard")
-                  or key in ("catchUpLimit", "eventsLimit", "savedLimit")},
+    "dashboard": {key for key in DEFAULT_SETTINGS if key.startswith("dashboard")},
     "refresh": {"refreshOnOpen", "systemCheckOnOpen", "periodicRefresh", "refreshInterval",
                 "newItemNotifications",
                 "periodicVideos"} |
@@ -282,7 +275,8 @@ def bounded_file_read(path, limit):
 
 
 @contextmanager
-def advisory_lock(path, timeout=STATE_LOCK_TIMEOUT):
+def advisory_lock(path, timeout=STATE_LOCK_TIMEOUT,
+                  timeout_message="Timed out waiting for the local plugin state lock."):
     deadline = time.monotonic() + timeout
     with private_directory(path.parent) as directory:
         descriptor = private_file(directory, path.name, os.O_RDWR, create=True)
@@ -294,7 +288,7 @@ def advisory_lock(path, timeout=STATE_LOCK_TIMEOUT):
                 except BlockingIOError:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeError("Timed out waiting for the local plugin state lock.")
+                        raise RuntimeError(timeout_message)
                     time.sleep(min(0.05, remaining))
             yield
         finally:
@@ -462,6 +456,11 @@ def valid_id_list(values, limit):
 def valid_settings(value):
     if not isinstance(value, dict):
         return {}
+    # Earlier versions named the Dashboard Sources panel "Catch up".
+    if "dashboard_sources" not in value and "dashboard_catchUp" in value:
+        value = dict(value, dashboard_sources=value["dashboard_catchUp"])
+    if isinstance(value.get("dashboardOrder"), str):
+        value = dict(value, dashboardOrder=value["dashboardOrder"].lower().replace("catchup", "sources"))
     settings = {}
     for key, allowed in SETTING_VALUES.items():
         candidate = value.get(key)
@@ -1656,20 +1655,20 @@ def public_state(state, errors=None):
     }
 
 
-def perform_fetch(state, sources=None):
+def selected_sources(state, sources=None):
     selected = set(SOURCE_KEYS if sources is None else sources)
     if not selected <= set(SOURCE_KEYS):
         raise ValueError("Invalid refresh sources.")
-    selected = {key for key in selected if state["settings"].get("section_" + key, True)}
-    if not selected:
-        return public_state(state)
+    return {key for key in selected if state["settings"].get("section_" + key, True)}
+
+
+def download_sources(selected, settings):
     updated = {}
     errors = {}
-    theme_source_changed = False
-    initial_sources = {key for key in selected
-                       if not state["sources"].get(key, {}).get("fetchedAt")}
+    if not selected:
+        return updated, errors
     with ThreadPoolExecutor(max_workers=4) as executor:
-        tasks = {executor.submit(fetch_source, key, state["settings"]): key for key in SOURCE_KEYS if key in selected}
+        tasks = {executor.submit(fetch_source, key, settings): key for key in SOURCE_KEYS if key in selected}
         for future in as_completed(tasks):
             key = tasks[future]
             try:
@@ -1678,6 +1677,25 @@ def perform_fetch(state, sources=None):
                 errors[key] = clean_text(str(error), 240) or SOURCE_ERRORS[key]
                 continue
             updated[key] = (normalize_items(key, rows), message)
+    return updated, errors
+
+
+def perform_fetch(state, sources=None):
+    selected = selected_sources(state, sources)
+    updated, errors = download_sources(selected, state["settings"])
+    return merge_fetch(state, selected, updated, errors)
+
+
+def merge_fetch(state, selected, updated, errors):
+    """Merge downloaded rows into the latest state; call while holding the state lock."""
+    selected = selected_sources(state, selected)
+    updated = {key: value for key, value in updated.items() if key in selected}
+    errors = {key: value for key, value in errors.items() if key in selected}
+    if not selected:
+        return public_state(state)
+    theme_source_changed = False
+    initial_sources = {key for key in selected
+                       if not state["sources"].get(key, {}).get("fetchedAt")}
 
     for key in SOURCE_KEYS:
         if key not in selected:
@@ -2036,6 +2054,9 @@ def system_status():
         query, error = system_command(["pacman", "-Qu", "--dbpath", database, "--color", "never"], 15)
         if query is None:
             fields["update"] = {"status": "unknown", "detail": error}
+        elif query.returncode == 1 and not query.stdout.strip() and not query.stderr.strip():
+            # pacman -Qu exits 1 with no output when nothing is upgradable.
+            fields["update"] = {"status": "none", "detail": ""}
         elif query.returncode != 0:
             fields["update"] = {"status": "unknown", "detail": clean_text(query.stderr, 240) or
                                 "The package database query failed."}
@@ -2091,32 +2112,48 @@ def main():
         with advisory_lock(state_lock_path()):
             emit_json(save_display(display))
         return
+    if sys.argv[1] == "fetch":
+        fetch_main()
+        return
     with advisory_lock(state_lock_path()):
         state_main()
+
+
+def fetch_main():
+    if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] not in ("on-open", "scheduled")):
+        raise ValueError("fetch accepts only on-open or scheduled mode.")
+    mode = sys.argv[2] if len(sys.argv) == 3 else "manual"
+    with advisory_lock(state_lock_path().with_name(".fetch.lock"),
+                       timeout_message="Another refresh is already in progress."):
+        with advisory_lock(state_lock_path()):
+            state = load_state()
+        sources = fetch_sources_for_mode(state, mode)
+        # Downloads run without the state lock; results merge into fresh state.
+        updated, errors = download_sources(selected_sources(state, sources), state["settings"])
+        with advisory_lock(state_lock_path()):
+            emit_json(merge_fetch(load_state(), sources, updated, errors))
+
+
+def fetch_sources_for_mode(state, mode):
+    selected = state["settings"]
+    enabled_sources = [key for key in SOURCE_KEYS
+                       if selected.get("section_" + key, True)]
+    if mode == "on-open":
+        sources = [key for key in enabled_sources if selected.get("refresh_" + key, True)] \
+            if selected["refreshOnOpen"] else []
+    elif mode == "scheduled":
+        sources = [key for key in enabled_sources if selected.get("refresh_" + key, True)
+                   and (key != "videos" or selected.get("periodicVideos", False))] \
+            if selected.get("periodicRefresh", True) else []
+    else:
+        sources = enabled_sources
+    return sources
 
 
 def state_main():
     state = load_state()
     if sys.argv[1] == "load":
         emit_json(public_state(state))
-    elif sys.argv[1] == "fetch":
-        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] not in ("on-open", "scheduled")):
-            raise ValueError("fetch accepts only on-open or scheduled mode.")
-        mode = sys.argv[2] if len(sys.argv) == 3 else "manual"
-        selected = state["settings"]
-        enabled_sources = [key for key in SOURCE_KEYS
-                           if selected.get("section_" + key, True)]
-        if mode == "on-open":
-            sources = [key for key in enabled_sources if selected.get("refresh_" + key, True)] \
-                if selected["refreshOnOpen"] else []
-        elif mode == "scheduled":
-            sources = [key for key in enabled_sources if selected.get("refresh_" + key, True)
-                       and (key != "videos" or selected.get("periodicVideos", False))] \
-                if selected.get("periodicRefresh", True) else []
-        else:
-            sources = enabled_sources
-        payload = perform_fetch(state, sources)
-        emit_json(payload)
     elif sys.argv[1] in ("mark-read", "toggle-read", "toggle-saved", "set-setting",
                         "mark-all-read", "mark-all-unread", "mark-read-items",
                         "save-filters", "reset-settings", "clear-saved"):
