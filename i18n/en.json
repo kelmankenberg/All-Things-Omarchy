@@ -1,5 +1,5 @@
 {
-  "actions.filterInputHelp": "Type filter text directly. Clipboard paste and input-method composition are disabled to protect the shared shell.",
+  "actions.filterInputHelp": "Type a term, then press Enter or Add term. Repeat to combine terms; remove each term with its own close button. Results must match every term. Clipboard paste and input-method composition are disabled to protect the shared shell.",
   "widget.tooltip": "All Things Omarchy",
   "widget.newItems": {
     "one": "All Things Omarchy: %1 new item",
@@ -37,8 +37,8 @@
   "actions.close": "Close",
   "actions.cancel": "Cancel",
   "actions.browse": "Browse",
-  "actions.filter": "Filter items… (Enter to add)",
-  "actions.addFilter": "Add filter term",
+  "actions.filter": "Type a term, then press Enter",
+  "actions.addFilter": "Add term",
   "actions.removeFilter": "Remove filter: %1",
   "actions.openSource": "Open source",
   "actions.open": "Open",
@@ -48,6 +48,10 @@
   "actions.unread": "Mark unread",
   "actions.allRead": "Mark all read",
   "actions.allUnread": "Mark all unread",
+  "actions.hideRead": "Hide read",
+  "actions.showRead": "Show read",
+  "actions.hideReadHelp": "Hide read items in this section",
+  "actions.showReadHelp": "Show read items in this section",
   "actions.allFeedsScope": "All loaded feed and Saved items",
   "mode.docked": "Docked",
   "mode.window": "Window",

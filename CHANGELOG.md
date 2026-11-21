@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 - 2026-11-21
+
+### Added
+
+- Each section list has a Hide read / Show read button to filter read items
+  without changing their read or saved status. The choice is kept separately
+  for each section while the shell is running.
+
+### Changed
+
+- Made multi-term section filters clearer with a labeled Add term button and
+  input guidance. Each term has its own close button, and adding a term keeps
+  keyboard focus in the filter for the next term.
+
 ## 0.3.0 - 2026-11-16
 
 ### Added

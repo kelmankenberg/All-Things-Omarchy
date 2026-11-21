@@ -57,6 +57,11 @@ TestCase {
       next[section] = value
       filterTerms = next
     }
+    onHideReadChanged: function(section, value) {
+      var next = Object.assign({}, hideReadBySection)
+      next[section] = value
+      hideReadBySection = next
+    }
     onNavigationToggleRequested: navigationCollapsed = !navigationCollapsed
     onSystemRequested: testCase.systemRequests++
     onThemeSelected: function(name) { testCase.selectedTheme = name }
@@ -88,6 +93,7 @@ TestCase {
     app.model = fixtureModel
     app.queries = ({})
     app.filterTerms = ({})
+    app.hideReadBySection = ({})
     app.navigationCollapsed = false
     app.currentSettingsSection = "general"
     app.busy = false
@@ -191,6 +197,50 @@ TestCase {
     compare(lastMutation, "mark-all-unread:dashboard")
     app.setSection("settings")
     verify(!read.visible)
+  }
+
+  function test_read_visibility_filters_each_section_without_changing_status() {
+    var read = Object.assign(item("Dark read", "Alice", "plugins"), { isRead: true })
+    var unread = item("Dark unread", "Alice", "plugins")
+    var other = item("Light unread", "Bob", "plugins")
+    var saved = Object.assign(item("Saved read", "", "news"), { isRead: true, isSaved: true })
+    var manual = Object.assign(item("Manual read", "", "manual"), { isRead: true })
+    app.model = ({ items: { plugins: [read, unread, other], saved: [saved],
+      manual: [manual], themes: [item("Theme", "", "themes")] } })
+    app.queries = ({ plugins: "dark" })
+    compare(app.sectionItems("plugins").length, 2)
+    var toggle = findChild(app, "readVisibilityButton")
+    compare(toggle.text, app.t("actions.hideRead"))
+    mouseClick(toggle)
+    compare(toggle.text, app.t("actions.showRead"))
+    compare(app.sectionItems("plugins").map(function(row) { return row.id }).join("|"), unread.id)
+    compare(lastMutation, "")
+    verify(findChild(app, "markAllRead").enabled)
+    findChild(app, "markAllRead").clicked()
+    compare(lastMutation, "mark-all-read:plugins")
+    app.model = Object.assign({}, app.model, { items: Object.assign({}, app.model.items, {
+      plugins: [read, Object.assign({}, unread, { isRead: true }), other]
+    }) })
+    compare(app.sectionItems("plugins").length, 0)
+    mouseClick(toggle)
+    compare(app.sectionItems("plugins").length, 2)
+    mouseClick(toggle)
+    app.setSection("themes")
+    compare(findChild(app, "readVisibilityButton").text, app.t("actions.hideRead"))
+    app.setSection("plugins")
+    compare(findChild(app, "readVisibilityButton").text, app.t("actions.showRead"))
+    app.setSection("saved")
+    toggle = findChild(app, "readVisibilityButton")
+    compare(app.sectionItems("saved").length, 1)
+    mouseClick(toggle)
+    compare(app.sectionItems("saved").length, 0)
+    app.setSection("manual")
+    toggle = findChild(app, "readVisibilityButton")
+    compare(app.sectionItems("manual").length, 1)
+    mouseClick(toggle)
+    compare(app.sectionItems("manual").length, 0)
+    mouseClick(toggle)
+    compare(app.sectionItems("manual").length, 1)
   }
 
   function test_hidden_sections_leave_pinned_navigation_and_dashboard_content() {
@@ -452,6 +502,15 @@ TestCase {
     mouseClick(add)
     compare(app.filterTerms.plugins.join("|"), "dark|alice")
     compare(app.sectionItems("plugins").length, 1)
+    verify(input.activeFocus)
+    compare(add.text, app.t("actions.addFilter"))
+    var secondRemove = findChild(app, "removeFilterButton_1")
+    verify(secondRemove !== null && secondRemove.visible)
+    mouseClick(secondRemove)
+    compare(app.filterTerms.plugins.join("|"), "dark")
+    enterText("alice")
+    keyClick(Qt.Key_Return)
+    compare(app.filterTerms.plugins.join("|"), "dark|alice")
 
     app.setSection("themes")
     compare(app.sectionItems("themes").length, 1)
@@ -461,6 +520,9 @@ TestCase {
     compare(app.filterTerms.plugins.join("|"), "dark|alice")
     compare(app.filterTerms.themes.join("|"), "theme")
 
+    viewport = findChild(app, "filterTermsViewport")
+    wait(50)
+    viewport.contentX = 0
     wait(50)
     var remove = findChild(app, "removeFilterButton_0")
     verify(remove !== null)

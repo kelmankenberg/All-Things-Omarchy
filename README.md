@@ -34,11 +34,15 @@ sessions; collapsed navigation stays at 52 pixels.
   Each selector is remembered while
   the shell is running. Themes follow the official site's order; the site does
   not provide listing dates.
-- Type in a section's filter to narrow results, then press Enter or the plus
-  button to add the text as a term. Results must match every term; remove a
-  term with its × button or press Backspace at the start of the filter text.
+- Type in a section's filter to narrow results, then press Enter or **Add term**
+  to add the text as a removable chip. Repeat for multiple terms. Results must
+  match every term; remove a term with its × button or press Backspace at the
+  start of the filter text.
   Phrases are supported, and each section retains its own terms and unfinished
   input while the shell is running.
+- Use **Hide read** or **Show read** to toggle read items in each section,
+  including Saved and the reference lists. The choice is per section and lasts
+  until the shell restarts; it does not change item status or bulk actions.
 - **Manual** searches the official manual's chapter and section text and opens
   matching sections. **Hotkeys** searches the official documented default
   shortcuts; locally customized bindings may differ. Both preserve source

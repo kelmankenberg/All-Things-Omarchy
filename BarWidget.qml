@@ -22,6 +22,7 @@ BarWidget {
   property var queries: ({})
   property var filterTerms: ({})
   property var dateRanges: ({})
+  property var hideReadBySection: ({})
   property bool navigationCollapsed: false
   property string status: ""
   property bool busy: false
@@ -693,6 +694,7 @@ BarWidget {
       queries: root.queries
       filterTerms: root.filterTerms
       dateRanges: root.dateRanges
+      hideReadBySection: root.hideReadBySection
       navigationCollapsed: root.navigationCollapsed
       systemData: root.systemData
       systemBusy: root.systemBusy
@@ -711,6 +713,11 @@ BarWidget {
       onQueryChanged: function(section, value) { root.updateQuery(section, value) }
       onFilterTermsEdited: function(section, value) { root.updateFilterTerms(section, value) }
       onDateRangeChanged: function(section, value) { root.updateDateRange(section, value) }
+      onHideReadChanged: function(section, value) {
+        var next = Object.assign({}, root.hideReadBySection)
+        next[section] = value
+        root.hideReadBySection = next
+      }
       onMutationRequested: function(action, itemId) { root.mutate([action, itemId]) }
       readingActive: root.dockedOpen
       onSettingChanged: function(key, value) { root.updateDataSetting(key, value) }
@@ -747,6 +754,7 @@ BarWidget {
       queries: root.queries
       filterTerms: root.filterTerms
       dateRanges: root.dateRanges
+      hideReadBySection: root.hideReadBySection
       navigationCollapsed: root.navigationCollapsed
       systemData: root.systemData
       systemBusy: root.systemBusy
@@ -766,6 +774,11 @@ BarWidget {
       onQueryChanged: function(section, value) { root.updateQuery(section, value) }
       onFilterTermsEdited: function(section, value) { root.updateFilterTerms(section, value) }
       onDateRangeChanged: function(section, value) { root.updateDateRange(section, value) }
+      onHideReadChanged: function(section, value) {
+        var next = Object.assign({}, root.hideReadBySection)
+        next[section] = value
+        root.hideReadBySection = next
+      }
       onMutationRequested: function(action, itemId) { root.mutate([action, itemId]) }
       readingActive: window.visible && windowView.Window.active
       onSettingChanged: function(key, value) { root.updateDataSetting(key, value) }

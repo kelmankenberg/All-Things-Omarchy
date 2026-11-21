@@ -19,6 +19,7 @@ Rectangle {
   property var queries: ({})
   property var filterTerms: ({})
   property var dateRanges: ({})
+  property var hideReadBySection: ({})
   property double currentTime: Date.now()
   property bool windowMode: false
   property bool navigationCollapsed: false
@@ -49,6 +50,7 @@ Rectangle {
   signal queryChanged(string section, string value)
   signal filterTermsEdited(string section, var value)
   signal dateRangeChanged(string section, string value)
+  signal hideReadChanged(string section, bool value)
   signal mutationRequested(string action, string itemId)
   signal settingChanged(string key, string value)
   signal settingsResetRequested(string group)
@@ -460,6 +462,8 @@ Rectangle {
     terms.push(queries[section] || "")
     var rows = Feed.filterItems(items, section === "saved" || undated
       ? "all" : (dateRanges[section] || "all"), terms, currentTime, !ordered, section === "events")
+    if (hideReadBySection[section] === true)
+      rows = rows.filter(function(item) { return item.isRead !== true })
     if (section === "events") rows.sort(function(a, b) {
       var now = root.currentTime / 1000
       var upcomingA = Number(a.timestamp) >= now
@@ -483,7 +487,8 @@ Rectangle {
     id: tracker
     tracking: root.readingActive && root.visible && root.setting("markReadOnScroll", true)
     busy: root.busy
-    contextKey: JSON.stringify([root.currentSection, root.queries, root.filterTerms, root.dateRanges])
+    contextKey: JSON.stringify([root.currentSection, root.queries, root.filterTerms, root.dateRanges,
+      root.hideReadBySection])
     onReadRequested: function(ids) { root.mutationRequested("mark-read-items", JSON.stringify(ids)) }
     Connections {
       target: root
@@ -1173,7 +1178,8 @@ Rectangle {
                 delegate: Rectangle {
                   required property string modelData
                   required property int index
-                  width: Math.min(Style.space(200), termLabel.implicitWidth + Style.space(42))
+                  width: Math.min(filterInput.width * 0.6, Style.space(200),
+                    termLabel.implicitWidth + Style.space(42))
                   height: Math.min(Style.space(28), termsViewport.height)
                   radius: Style.cornerRadius
                   color: "transparent"
@@ -1212,11 +1218,13 @@ Rectangle {
         }
         OutlineButton {
           objectName: "addFilterButton"
-          iconOnly: true
-          text: "+"
-          description: root.t("actions.addFilter")
+          leadingIcon: "+"
+          text: root.t("actions.addFilter")
           enabled: filterInput.text.trim() !== ""
-          onClicked: root.addFilterTerm(root.currentSection)
+          onClicked: {
+            root.addFilterTerm(root.currentSection)
+            filterInput.forceActiveFocus()
+          }
         }
         OutlineButton {
           objectName: "openSourceButton"
@@ -1226,11 +1234,12 @@ Rectangle {
         }
       }
       RowLayout {
-        visible: root.currentSection !== "saved" && root.currentSection !== "themes"
+        readonly property bool dateAvailable: root.currentSection !== "saved" && root.currentSection !== "themes"
           && root.currentSection !== "community"
           && !root.isReference(root.currentSection)
         Layout.fillWidth: true
         Text {
+          visible: parent.dateAvailable
           textFormat: Text.PlainText
           text: root.t("listing.dateRange")
           color: Commons.Color.popups.text
@@ -1238,11 +1247,24 @@ Rectangle {
           font.pixelSize: Style.font.body
         }
         ComboBox {
+          visible: parent.dateAvailable
           Layout.fillWidth: true
           model: [root.t("range.all"), root.t("range.today"),
             root.t("range.week"), root.t("range.month")]
           currentIndex: Math.max(0, root.rangeIds.indexOf(root.dateRanges[root.currentSection] || "all"))
           onActivated: function(index) { root.dateRangeChanged(root.currentSection, root.rangeIds[index]) }
+        }
+        Item {
+          visible: !parent.dateAvailable
+          Layout.fillWidth: true
+        }
+        OutlineButton {
+          objectName: "readVisibilityButton"
+          readonly property bool hiding: root.hideReadBySection[root.currentSection] === true
+          text: root.t(hiding ? "actions.showRead" : "actions.hideRead")
+          description: root.t(hiding ? "actions.showReadHelp" : "actions.hideReadHelp")
+          highlighted: hiding
+          onClicked: root.hideReadChanged(root.currentSection, !hiding)
         }
       }
       Text {
@@ -1335,7 +1357,7 @@ Rectangle {
         readonly property var rows: root.sectionItems(root.currentSection)
         readonly property string filterContext: JSON.stringify([root.currentSection,
           root.queries[root.currentSection], root.filterTerms[root.currentSection],
-          root.dateRanges[root.currentSection]])
+          root.dateRanges[root.currentSection], root.hideReadBySection[root.currentSection]])
         onFilterContextChanged: Qt.callLater(function() {
           listingScroll.forceLayout()
           listingScroll.positionViewAtBeginning()
