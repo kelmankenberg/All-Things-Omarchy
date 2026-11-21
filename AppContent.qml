@@ -23,9 +23,16 @@ Rectangle {
   property double currentTime: Date.now()
   property bool windowMode: false
   property bool navigationCollapsed: false
-  property int navigationWidth: 160
-  readonly property int savedNavigationWidth: Math.max(160, Math.min(220,
-    Number(setting("navigationWidth", 160))))
+  readonly property int navigationMinWidth: 140
+  readonly property int navigationMaxWidth: 360
+  readonly property int navigationDefaultWidth: 160
+  property int navigationWidth: navigationDefaultWidth
+  readonly property int savedNavigationWidth: Math.max(navigationMinWidth, Math.min(navigationMaxWidth,
+    Number(setting("navigationWidth", navigationDefaultWidth))))
+  readonly property int navigationLimit: Math.max(navigationMinWidth, Math.min(navigationMaxWidth,
+    Math.floor(width * 0.45 / (Style.space(1000) / 1000))))
+  readonly property int effectiveNavigationWidth: width > 0
+    ? Math.min(navigationWidth, navigationLimit) : navigationWidth
   onSavedNavigationWidthChanged: navigationWidth = savedNavigationWidth
   Component.onCompleted: navigationWidth = savedNavigationWidth
   property var systemData: ({})
@@ -722,7 +729,7 @@ Rectangle {
       Rectangle {
         id: navigationPanel
         objectName: "navigationPanel"
-        Layout.preferredWidth: Style.space(root.navigationCollapsed ? 52 : root.navigationWidth)
+        Layout.preferredWidth: Style.space(root.navigationCollapsed ? 52 : root.effectiveNavigationWidth)
         Layout.minimumWidth: Layout.preferredWidth
         Layout.maximumWidth: Layout.preferredWidth
         Layout.fillHeight: true
@@ -831,41 +838,61 @@ Rectangle {
 
       Item {
         visible: !root.navigationCollapsed
-        Layout.preferredWidth: Style.space(6)
+        Layout.preferredWidth: Style.space(10)
         Layout.fillHeight: true
         Rectangle {
-          anchors.centerIn: parent
-          width: 1
-          height: Style.space(32)
+          anchors.horizontalCenter: parent.horizontalCenter
+          width: navigationResize.containsMouse || navigationResize.pressed ? 2 : 1
+          height: parent.height
           color: navigationResize.containsMouse || navigationResize.pressed
             ? Commons.Color.accent : Commons.Color.popups.border
+        }
+        Column {
+          anchors.centerIn: parent
+          spacing: Style.space(3)
+          Repeater {
+            model: 3
+            delegate: Rectangle {
+              width: Style.space(3)
+              height: width
+              radius: width / 2
+              color: navigationResize.containsMouse || navigationResize.pressed
+                ? Commons.Color.accent : Commons.Color.popups.border
+            }
+          }
         }
         MouseArea {
           id: navigationResize
           objectName: "navigationResizeHandle"
           anchors.fill: parent
-          enabled: !root.busy
           hoverEnabled: true
+          preventStealing: true
+          acceptedButtons: Qt.LeftButton
           cursorShape: Qt.SizeHorCursor
           property real startX: 0
-          property int startWidth: 160
+          property int startWidth: root.navigationDefaultWidth
           ToolTip.visible: containsMouse && !pressed
           ToolTip.delay: 400
           ToolTip.text: root.t("nav.resize")
+          function save() {
+            if (root.navigationWidth !== root.savedNavigationWidth)
+              root.settingChanged("navigationWidth", String(root.navigationWidth))
+          }
           onPressed: function(mouse) {
             startX = mapToItem(root, mouse.x, mouse.y).x
-            startWidth = root.navigationWidth
+            startWidth = root.effectiveNavigationWidth
           }
           onPositionChanged: function(mouse) {
             if (!pressed) return
             var delta = (mapToItem(root, mouse.x, mouse.y).x - startX)
               * (root.LayoutMirroring.enabled ? -1 : 1)
-            root.navigationWidth = Math.max(160, Math.min(220,
+            root.navigationWidth = Math.max(root.navigationMinWidth, Math.min(root.navigationLimit,
               Math.round(startWidth + delta / (Style.space(1000) / 1000))))
           }
-          onReleased: {
-            if (root.navigationWidth !== root.savedNavigationWidth)
-              root.settingChanged("navigationWidth", String(root.navigationWidth))
+          onReleased: save()
+          onDoubleClicked: {
+            root.navigationWidth = root.navigationDefaultWidth
+            save()
           }
           onCanceled: root.navigationWidth = root.savedNavigationWidth
         }

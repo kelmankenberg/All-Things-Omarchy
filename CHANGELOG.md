@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 - 2026-11-21
+
+### Fixed
+
+- The left navigation panel could not be resized in practice. The divider is
+  now easier to grab and drag: a wider grab area with a visible
+  full-height line and grip, a 140-360 pixel range (at most 45% of the panel),
+  dragging while sources refresh, and double-click to restore the default.
+
 ## 0.4.0 - 2026-11-21
 
 ### Added

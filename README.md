@@ -11,8 +11,9 @@ reopening; the window manager may override the size when the window is tiled.
 The toolbar's navigation toggle switches between labeled and icon-only navigation;
 hover an icon for its label.
 Drag the navigation's right-edge divider to adjust its expanded width from
-160 to 220 pixels (scaled with the interface). The width is saved between
-sessions; collapsed navigation stays at 52 pixels.
+140 to 360 pixels (scaled with the interface, and never more than 45% of the
+panel). Double-click the divider to restore the default width. The width is
+saved between sessions; collapsed navigation stays at 52 pixels.
 
 ## Sections
 

@@ -97,7 +97,7 @@ BOOLEAN_SETTINGS = {key for key, value in DEFAULT_SETTINGS.items() if isinstance
 SETTING_VALUES.update({key: {"true", "false"} for key in BOOLEAN_SETTINGS})
 SETTING_VALUES.update({
     "density": {"compact", "comfortable"},
-    "navigationWidth": {str(width) for width in range(160, 221)},
+    "navigationWidth": {str(width) for width in range(140, 361)},
     "refreshInterval": {"10", "15", "20", "30", "45", "60"},
     "dashboardOrder": {",".join(order).lower() for order in permutations(DASHBOARD_PANELS)},
 })

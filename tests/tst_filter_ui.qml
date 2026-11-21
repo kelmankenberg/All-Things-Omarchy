@@ -358,25 +358,34 @@ TestCase {
     var panel = findChild(app, "navigationPanel")
     var handle = findChild(app, "navigationResizeHandle")
     tryCompare(panel, "width", 160)
+    verify(handle.width >= 10)
     dragNavigationBy(40)
     tryCompare(panel, "width", 200)
     compare(lastSetting, "navigationWidth:200")
     compare(app.model.settings.navigationWidth, 200)
-    dragNavigationBy(100)
-    tryCompare(panel, "width", 220)
-    compare(lastSetting, "navigationWidth:220")
+    dragNavigationBy(1000)
+    tryCompare(panel, "width", app.navigationLimit)
+    verify(panel.width <= Math.max(360, app.width * 0.45))
+    compare(lastSetting, "navigationWidth:" + app.navigationLimit)
     app.navigationCollapsed = true
     tryCompare(panel, "width", 52)
     verify(!handle.visible)
     app.navigationCollapsed = false
-    tryCompare(panel, "width", 220)
-    dragNavigationBy(-200)
-    tryCompare(panel, "width", 160)
-    compare(lastSetting, "navigationWidth:160")
+    tryCompare(panel, "width", app.navigationLimit)
+    dragNavigationBy(-1000)
+    tryCompare(panel, "width", 140)
+    compare(lastSetting, "navigationWidth:140")
     app.model = Object.assign({}, app.model, { settings: { navigationWidth: 190 } })
     tryCompare(panel, "width", 190)
     app.busy = true
-    verify(!handle.enabled)
+    verify(handle.enabled)
+    dragNavigationBy(20)
+    tryCompare(panel, "width", 210)
+    app.busy = false
+    var center = handle.mapToItem(app, handle.width / 2, handle.height / 2)
+    mouseDoubleClickSequence(app, center.x, center.y)
+    tryCompare(panel, "width", 160)
+    compare(lastSetting, "navigationWidth:160")
   }
 
   function test_scrolling_past_visible_rows_marks_read_after_one_second() {

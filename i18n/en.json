@@ -31,7 +31,7 @@
   },
   "nav.collapse": "Collapse navigation",
   "nav.expand": "Expand navigation",
-  "nav.resize": "Drag to resize navigation",
+  "nav.resize": "Drag to resize navigation · double-click to reset",
   "actions.loading": "Loading…",
   "actions.refresh": "Refresh",
   "actions.close": "Close",

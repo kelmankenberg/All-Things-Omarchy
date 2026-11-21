@@ -631,19 +631,19 @@ else:
         self.assertNotIn("refreshInterval", backend.valid_settings({"refreshInterval": "9"}))
 
     def test_navigation_width_is_bounded_persisted_and_reset_with_appearance(self):
-        for width in (160, 190, 220):
+        for width in (140, 190, 360):
             self.assertEqual(width, backend.valid_settings({"navigationWidth": str(width)})["navigationWidth"])
-        for width in (159, 221, "190.5", True):
+        for width in (139, 361, "190.5", True):
             self.assertNotIn("navigationWidth", backend.valid_settings({"navigationWidth": width}))
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(backend, "state_path", return_value=Path(directory) / "state.json"):
             backend.save_state(backend.empty_state())
-            with patch.object(sys, "argv", ["Backend.py", "set-setting", "navigationWidth", "220"]), \
+            with patch.object(sys, "argv", ["Backend.py", "set-setting", "navigationWidth", "360"]), \
                     patch("builtins.print"):
                 backend.main()
-            self.assertEqual(220, backend.load_state()["settings"]["navigationWidth"])
+            self.assertEqual(360, backend.load_state()["settings"]["navigationWidth"])
             original = backend.state_path().read_bytes()
-            with patch.object(sys, "argv", ["Backend.py", "set-setting", "navigationWidth", "221"]):
+            with patch.object(sys, "argv", ["Backend.py", "set-setting", "navigationWidth", "361"]):
                 with self.assertRaises(ValueError):
                     backend.main()
             self.assertEqual(original, backend.state_path().read_bytes())
